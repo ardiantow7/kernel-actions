@@ -1,0 +1,574 @@
+name: Build Kernel 4.19 SDM660
+
+on:
+  workflow_dispatch:
+    inputs:
+      kernel_repo:
+        description: 'URL repositori source kernel yang akan di-build'
+        required: false
+        default: 'https://github.com/ardiantow7/android_kernel_xiaomi_sdm660_419'
+        type: string
+      kernel_branch:
+        description: 'Branch pada repositori source kernel di atas'
+        required: false
+        default: 'back'
+        type: string
+      defconfig:
+        description: 'Defconfig yang dipakai'
+        required: false
+        default: 'vendor/whyred-perf_defconfig'
+      toolchain:
+        description: 'Toolchain Clang yang dipakai'
+        required: false
+        default: 'aosp17'
+        type: choice
+        options:
+          - proton13
+          - aosp20
+          - aosp17
+          - zyc14
+          - neutron
+      lto_mode:
+        description: 'Mode LTO (thin/full/none)'
+        required: false
+        default: 'thin'
+        type: choice
+        options:
+          - thin
+          - full
+          - none
+      artifact_scope:
+        description: 'File tambahan yang diupload sebagai artifact (zip AnyKernel3 selalu diupload)'
+        required: false
+        default: 'ringkas'
+        type: choice
+        options:
+          - ringkas
+          - lengkap
+      kbuild_build_host:
+        description: 'Custom user@host (atau host saja), kosongkan untuk pakai default "builder@ardiantowb"'
+        required: false
+        type: string
+        default: ''
+      build_timezone:
+        description: 'Timezone (IANA) untuk timestamp build, misal Asia/Jakarta'
+        required: false
+        type: string
+        default: 'UTC'
+      kbuild_build_timestamp:
+        description: 'Custom KBUILD_BUILD_TIMESTAMP, kosongkan untuk pakai waktu build asli sesuai timezone di atas'
+        required: false
+        type: string
+        default: ''
+
+env:
+  KERNEL_DIR: ${{ github.workspace }}/kernel
+  TC_DIR: ${{ github.workspace }}/toolchain/clang
+  OUT_DIR: ${{ github.workspace }}/kernel/out
+
+  ANYKERNEL_REPO: https://github.com/osm0sis/AnyKernel3
+
+  # --- Sumber tiap toolchain ---
+  # proton13 -> Proton Clang (kdrag0n), rilis terakhir = Clang 13.0.0 (20210522)
+  PROTON_CLANG_REPO: https://github.com/kdrag0n/proton-clang
+  # aosp20   -> AOSP Clang r547379 (Clang 20.0.0, dipakai untuk rilis Android 16) - default
+  AOSP_CLANG_URL: https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86
+  AOSP_CLANG_TAG: r547379
+  # aosp17   -> AOSP Clang r487747c (Clang 17.0.2, dipakai untuk rilis Android U) -
+  #             default. MLGO (ML-guided register allocation) dimatikan lewat flag
+  #             "-mllvm -regalloc-enable-advisor=default" saat build (lihat step
+  #             "Build kernel"). Versi ini sudah dihapus dari branch "main" upstream,
+  #             jadi diambil dari commit lama yang masih menyimpannya.
+  AOSP_CLANG17_TAG: r487747c
+  AOSP_CLANG17_COMMIT: 7f17fbadc9ee07a636afb6083bf84c481a7cc2ab
+  # zyc14    -> ZyC Clang 14.0.6 (build 20260619)
+  ZYC_CLANG_URL: https://github.com/ZyCromerZ/Clang/releases/download/14.0.6-20260619-release/Clang-14.0.6-20260619.tar.gz
+  # neutron  -> Neutron Clang, rilis 06092026
+  NEUTRON_CLANG_URL: https://github.com/Neutron-Toolchains/clang-build-catalogue/releases/download/06092026/neutron-clang-06092026.tar.zst
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350  # batas runner free 6 jam, beri margin
+
+    steps:
+      # ------------------------------------------------------------------
+      # 1. CLONE SUMBER KERNEL
+      #    Workflow ini terpisah dari repo kernel (ditaruh di repo build
+      #    khusus), jadi repo & branch kernel dipilih lewat input
+      #    kernel_repo/kernel_branch saat "Run workflow" - bukan lagi
+      #    otomatis checkout repo tempat workflow ini berada.
+      # ------------------------------------------------------------------
+      - name: Clone sumber kernel
+        run: |
+          git clone --recursive --depth=1 -j "$(nproc)" \
+            --branch "${{ github.event.inputs.kernel_branch || 'back' }}" \
+            "${{ github.event.inputs.kernel_repo || 'https://github.com/ardiantow7/android_kernel_xiaomi_sdm660_419' }}" \
+            "${{ env.KERNEL_DIR }}"
+
+      # ------------------------------------------------------------------
+      # 2. CEK SISA DISK
+      #    Kernel + toolchain + ccache bisa mendekati batas ~14GB disk
+      #    kosong di runner free. Tampilkan saja di log sebagai peringatan dini.
+      # ------------------------------------------------------------------
+      - name: Cek sisa disk
+        run: df -h /
+
+      # ------------------------------------------------------------------
+      # 3. SWAP TAMBAHAN (selalu aktif, ukuran menyesuaikan mode LTO)
+      #    Cara menonaktifkan swap KHUSUS untuk thin/none (full tetap pakai):
+      #    Tambahkan baris "if:" ini tepat di bawah "- name: Setup swap tambahan":
+      #        if: ${{ (github.event.inputs.lto_mode || 'thin') == 'full' }}
+      #
+      #    Cara menonaktifkan swap TOTAL untuk semua mode (termasuk full):
+      #    Beri tanda # di setiap baris pada step ini (dari "- name:" sampai "free -h").
+      # ------------------------------------------------------------------
+      - name: Setup swap tambahan
+        run: |
+          LTO_MODE="${{ github.event.inputs.lto_mode || 'thin' }}"
+
+          if [ "$LTO_MODE" = "full" ]; then
+            SWAP_SIZE="8G"
+          else
+            SWAP_SIZE="4G"
+          fi
+
+          echo "Menambahkan swap ${SWAP_SIZE} (mode LTO: ${LTO_MODE})..."
+          sudo fallocate -l "$SWAP_SIZE" /swapfile_ci
+          sudo chmod 600 /swapfile_ci
+          sudo mkswap /swapfile_ci
+          sudo swapon /swapfile_ci
+          free -h
+
+      # ------------------------------------------------------------------
+      # 4. INSTALL DEPENDENCIES BUILD
+      # ------------------------------------------------------------------
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            bc bison flex libssl-dev libelf-dev \
+            build-essential zip curl git python3 \
+            python-is-python3 ccache llvm lld zstd \
+            gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi
+
+      # ------------------------------------------------------------------
+      # 4.5. TENTUKAN VERSI TOOLCHAIN (dipakai sebagai cache key)
+      # ------------------------------------------------------------------
+      - name: Tentukan versi toolchain
+        id: tcver
+        run: |
+          TOOLCHAIN="${{ github.event.inputs.toolchain || 'aosp17' }}"
+
+          case "$TOOLCHAIN" in
+            proton13)
+              VER="clang13-20210522"
+              ;;
+            aosp20)
+              VER="${AOSP_CLANG_TAG}"
+              ;;
+            aosp17)
+              VER="${AOSP_CLANG17_TAG}"
+              ;;
+            zyc14)
+              VER="14.0.6-20260619"
+              ;;
+            neutron)
+              VER="06092026"
+              ;;
+            *)
+              echo "Toolchain tidak dikenali: $TOOLCHAIN"
+              exit 1
+              ;;
+          esac
+
+          echo "toolchain=${TOOLCHAIN}" >> "$GITHUB_OUTPUT"
+          echo "ver=${VER}" >> "$GITHUB_OUTPUT"
+
+      # ------------------------------------------------------------------
+      # 5. CACHE TOOLCHAIN CLANG
+      #    (supaya tidak download/clone ulang setiap run)
+      # ------------------------------------------------------------------
+      - name: Cache toolchain
+        id: cache-toolchain
+        uses: actions/cache@v5
+        with:
+          path: ${{ env.TC_DIR }}
+          key: toolchain-${{ steps.tcver.outputs.toolchain }}-${{ steps.tcver.outputs.ver }}
+
+      - name: Download toolchain
+        if: steps.cache-toolchain.outputs.cache-hit != 'true'
+        run: |
+          TOOLCHAIN="${{ steps.tcver.outputs.toolchain }}"
+          mkdir -p "$TC_DIR"
+
+          case "$TOOLCHAIN" in
+            proton13)
+              echo "Mengkloning Proton Clang (Clang 13.0.0)..."
+              git clone --depth=1 "$PROTON_CLANG_REPO" "$TC_DIR"
+              ;;
+            aosp20)
+              echo "Mengunduh AOSP Clang ${AOSP_CLANG_TAG} (Clang 20.0.0)..."
+              curl -L --fail \
+                "${AOSP_CLANG_URL}/+archive/refs/heads/main/clang-${AOSP_CLANG_TAG}.tar.gz" \
+                -o /tmp/clang.tar.gz
+              tar -xzf /tmp/clang.tar.gz -C "$TC_DIR"
+              rm -f /tmp/clang.tar.gz
+              ;;
+            aosp17)
+              echo "Mengunduh AOSP Clang ${AOSP_CLANG17_TAG} (Clang 17.0.2, MLGO dimatikan saat build)..."
+              # Diambil dari commit lama (bukan "main") karena versi ini sudah
+              # dihapus dari branch main upstream.
+              curl -L --fail \
+                "${AOSP_CLANG_URL}/+archive/${AOSP_CLANG17_COMMIT}/clang-${AOSP_CLANG17_TAG}.tar.gz" \
+                -o /tmp/clang.tar.gz
+              tar -xzf /tmp/clang.tar.gz -C "$TC_DIR"
+              rm -f /tmp/clang.tar.gz
+              ;;
+            zyc14)
+              echo "Mengunduh ZyC Clang 14.0.6..."
+              curl -L --fail "$ZYC_CLANG_URL" -o /tmp/clang.tar.gz
+              tar -xzf /tmp/clang.tar.gz -C "$TC_DIR"
+              rm -f /tmp/clang.tar.gz
+              ;;
+            neutron)
+              echo "Mengunduh Neutron Clang..."
+              curl -L --fail "$NEUTRON_CLANG_URL" -o /tmp/clang.tar.zst
+              tar --zstd -xf /tmp/clang.tar.zst -C "$TC_DIR"
+              rm -f /tmp/clang.tar.zst
+              ;;
+          esac
+
+      # ------------------------------------------------------------------
+      # 6. CACHE CCACHE (mempercepat rebuild berikutnya)
+      #    Key ikut membedakan toolchain, supaya objek cache dari clang
+      #    yang berbeda tidak tercampur.
+      # ------------------------------------------------------------------
+      - name: Cache ccache
+        uses: actions/cache@v5
+        with:
+          path: ~/.ccache
+          key: ccache-sdm660419-${{ steps.tcver.outputs.toolchain }}-${{ github.event.inputs.defconfig || 'vendor/whyred-perf_defconfig' }}-${{ github.run_id }}
+          restore-keys: |
+            ccache-sdm660419-${{ steps.tcver.outputs.toolchain }}-${{ github.event.inputs.defconfig || 'vendor/whyred-perf_defconfig' }}-
+
+      - name: Setup ccache
+        run: |
+          export CCACHE_DIR=~/.ccache
+          ccache -M 5G
+          ccache -z
+
+      # ------------------------------------------------------------------
+      # 7. SETUP TOOLCHAIN ENV
+      # ------------------------------------------------------------------
+      - name: Setup toolchain PATH
+        run: echo "$TC_DIR/bin" >> "$GITHUB_PATH"
+
+      - name: Show toolchain info
+        run: |
+          which clang
+          clang --version
+
+      # ------------------------------------------------------------------
+      # 7.5. SIAPKAN ANYKERNEL3
+      # ------------------------------------------------------------------
+      - name: Siapkan AnyKernel3
+        run: |
+          # Selalu pakai branch "master" AnyKernel3 (osm0sis/AnyKernel3).
+          git clone --recursive --depth=1 --branch master \
+            "${{ env.ANYKERNEL_REPO }}" AnyKernel3
+
+          rm -f AnyKernel3/anykernel.sh
+          cat << 'EOF' > AnyKernel3/anykernel.sh
+          properties() { '
+          kernel.string=Welcome to Knight kernel
+          do.devicecheck=0
+          do.modules=0
+          do.systemless=1
+          do.cleanup=1
+          do.cleanuponabort=0
+          '; }
+
+          BLOCK=auto;
+          IS_SLOT_DEVICE=auto;
+          RAMDISK_COMPRESSION=auto;
+          PATCH_VBMETA_FLAG=auto;
+
+          . tools/ak3-core.sh;
+
+          if [ -f tools/banner.txt ]; then
+            while IFS= read -r bannerline || [ -n "$bannerline" ]; do
+              ui_print "$bannerline";
+            done < tools/banner.txt;
+          fi;
+
+          split_boot;
+          flash_boot;
+          EOF
+
+          mkdir -p AnyKernel3/tools
+          cat << 'EOF' > AnyKernel3/tools/banner.txt
+           
+                        /\  /\  /\  /\  /\              
+                        <>  <>  <>  <>  <>              
+                        ==================              
+           
+                    Knight kernel installation           
+                    by @ardiantowb on telegram          
+           
+             Thanks to @user_why_red (telegram) for source
+              and everyone who supported, tested, and used my kernel
+           
+                              ______                    
+                             /      \                   
+                            /        \                  
+                            |        |                  
+                             \      /                   
+                              \    /                    
+                               \  /                     
+                                \/                      
+           
+            "Ironclad stability, valiant performance"   
+                          Knight Kernel                 
+          EOF
+
+      # ------------------------------------------------------------------
+      # 7.6. SIAPKAN NAMA ARTIFACT
+      #      Format: kernel-4.19-{branch}-{run_number}-{tanggal}
+      #      Contoh: kernel-4.19-cp-st-7-22062026
+      #      Slash di nama branch (mis. release/v1) diganti jadi "-" karena
+      #      nama artifact tidak boleh mengandung "/".
+      #      Ditaruh sebelum step Build & pakai always() supaya nama ini
+      #      tetap tersedia walau build/verify gagal di tengah jalan -
+      #      dengan begitu log build tetap bisa terupload dengan nama yang benar.
+      # ------------------------------------------------------------------
+      - name: Siapkan nama artifact
+        id: meta
+        if: always()
+        run: |
+          BRANCH_NAME="${{ github.event.inputs.kernel_branch || 'back' }}"
+          BRANCH_SAFE="${BRANCH_NAME//\//-}"
+          TANGGAL=$(date +'%d%m%Y')
+          echo "artifact_name=kernel-4.19-${BRANCH_SAFE}-${{ github.run_number }}-${TANGGAL}" >> "$GITHUB_OUTPUT"
+
+      # ------------------------------------------------------------------
+      # 8. BUILD KERNEL (dengan timer)
+      # ------------------------------------------------------------------
+      - name: Build kernel
+        id: build
+        run: |
+          START_TIME=$(date +%s)
+
+          cd "$KERNEL_DIR"
+          mkdir -p "$OUT_DIR"
+
+          DEFCONFIG="${{ github.event.inputs.defconfig || 'vendor/whyred-perf_defconfig' }}"
+          LTO_MODE="${{ github.event.inputs.lto_mode || 'thin' }}"
+          TOOLCHAIN="${{ steps.tcver.outputs.toolchain }}"
+
+          # --- Host & timestamp build (custom, default timezone UTC) ---
+          BUILD_TZ="${{ github.event.inputs.build_timezone || 'UTC' }}"
+          CUSTOM_HOST="${{ github.event.inputs.kbuild_build_host }}"
+          CUSTOM_TIMESTAMP="${{ github.event.inputs.kbuild_build_timestamp }}"
+
+          # Default: builder@ardiantowb. Input boleh diisi "host" saja (user
+          # tetap "builder") atau lengkap "user@host" untuk override keduanya.
+          if [ -z "$CUSTOM_HOST" ]; then
+            BUILD_USER="builder"
+            BUILD_HOST="ardiantowb"
+          elif [[ "$CUSTOM_HOST" == *"@"* ]]; then
+            BUILD_USER="${CUSTOM_HOST%%@*}"
+            BUILD_HOST="${CUSTOM_HOST#*@}"
+          else
+            BUILD_USER="builder"
+            BUILD_HOST="$CUSTOM_HOST"
+          fi
+
+          if [ -n "$CUSTOM_TIMESTAMP" ]; then
+            BUILD_TIMESTAMP="$CUSTOM_TIMESTAMP"
+          else
+            BUILD_TIMESTAMP="$(TZ="$BUILD_TZ" date '+%a %B %d %H:%M:%S %Z %Y')"
+          fi
+
+          # SDM660 (Kryo 260: Cortex-A73 + Cortex-A53, ARMv8-A) tidak
+          # membawa LSE atomic instructions (baru ada di ARMv8.1-A ke
+          # atas), tapi Clang untuk target armv8-a generik tetap bisa
+          # menyisipkan pemanggilan outline-atomics yang butuh resolusi
+          # ifunc saat runtime - sesuatu yang tidak didukung di ruang
+          # kernel. Sama seperti optimasi di chopin, -mno-outline-atomics
+          # ditambahkan sebagai pengaman supaya build tidak menyisipkan
+          # pemanggilan tersebut.
+          CUSTOM_CFLAGS="-march=armv8-a -mno-outline -mno-outline-atomics"
+
+          # AOSP Clang 17 (r487747c) menyertakan model MLGO (machine-learning
+          # guided optimization) untuk alokasi register, dilatih dari artefak
+          # ARM64 ThinLTO userspace - belum tentu cocok untuk kode kernel.
+          # Matikan lewat -mllvm agar kembali ke heuristic register allocator
+          # bawaan LLVM.
+          if [ "$TOOLCHAIN" = "aosp17" ]; then
+            CUSTOM_CFLAGS="$CUSTOM_CFLAGS -mllvm -regalloc-enable-advisor=default"
+          fi
+
+          TOOLCHAIN_ARGS=(
+            ARCH=arm64
+            CC="ccache clang"
+            HOSTCC="ccache clang"
+            HOSTCXX="ccache clang++"
+            LD=ld.lld
+            AR=llvm-ar
+            NM=llvm-nm
+            OBJCOPY=llvm-objcopy
+            OBJDUMP=llvm-objdump
+            STRIP=llvm-strip
+            READELF=llvm-readelf
+            OBJSIZE=llvm-size
+            LLVM=1
+            LLVM_IAS=1
+            KBUILD_BUILD_USER="$BUILD_USER"
+            KBUILD_BUILD_HOST="$BUILD_HOST"
+            KBUILD_BUILD_TIMESTAMP="$BUILD_TIMESTAMP"
+            CLANG_TRIPLE=aarch64-linux-gnu-
+            CROSS_COMPILE=aarch64-linux-gnu-
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi-
+            KCFLAGS="$CUSTOM_CFLAGS"
+          )
+
+          if [ "$LTO_MODE" != "none" ]; then
+            TOOLCHAIN_ARGS+=(LTO="$LTO_MODE")
+          fi
+
+          echo "=== Defconfig: $DEFCONFIG | Toolchain: $TOOLCHAIN | LTO: $LTO_MODE | Host: ${BUILD_USER}@${BUILD_HOST} | Timestamp: ${BUILD_TIMESTAMP} ==="
+
+          LOG_FILE="${{ github.workspace }}/build.log"
+
+          make O="$OUT_DIR" "${TOOLCHAIN_ARGS[@]}" "$DEFCONFIG" 2>&1 | tee "$LOG_FILE"
+          make -j"$(nproc --all)" O="$OUT_DIR" "${TOOLCHAIN_ARGS[@]}" 2>&1 | tee -a "$LOG_FILE"
+          BUILD_EXIT=${PIPESTATUS[0]}
+
+          ccache -s | tee -a "$LOG_FILE"
+
+          END_TIME=$(date +%s)
+          DURATION=$((END_TIME - START_TIME))
+          MIN=$((DURATION / 60))
+          SEC=$((DURATION % 60))
+
+          echo "-----------------------------------------------------"
+          echo "Waktu total kompilasi: ${MIN} menit ${SEC} detik"
+          echo "-----------------------------------------------------"
+
+          # Simpan sebagai output step agar bisa dipakai di step summary/step lain
+          echo "duration_min=${MIN}" >> "$GITHUB_OUTPUT"
+          echo "duration_sec=${SEC}" >> "$GITHUB_OUTPUT"
+          echo "defconfig=${DEFCONFIG}" >> "$GITHUB_OUTPUT"
+          echo "lto_mode=${LTO_MODE}" >> "$GITHUB_OUTPUT"
+          echo "toolchain=${TOOLCHAIN}" >> "$GITHUB_OUTPUT"
+          echo "build_host=${BUILD_USER}@${BUILD_HOST}" >> "$GITHUB_OUTPUT"
+          echo "build_timestamp=${BUILD_TIMESTAMP}" >> "$GITHUB_OUTPUT"
+
+          exit "$BUILD_EXIT"
+
+      # ------------------------------------------------------------------
+      # 9. CEK HASIL BUILD
+      # ------------------------------------------------------------------
+      - name: Verify build output
+        run: |
+          if [ -f "$OUT_DIR/arch/arm64/boot/Image.gz-dtb" ] || [ -f "$OUT_DIR/arch/arm64/boot/Image.gz" ]; then
+            echo "BUILD BERHASIL"
+          else
+            echo "BUILD GAGAL - file Image.gz tidak ditemukan"
+            exit 1
+          fi
+
+      # ------------------------------------------------------------------
+      # 9.5. PAKET ANYKERNEL3
+      #      Chopin pakai Image + dtb terpisah, tapi build sdm660 ini
+      #      sudah menghasilkan Image.gz-dtb gabungan langsung, jadi
+      #      itu yang dipakai untuk AnyKernel3.
+      # ------------------------------------------------------------------
+      - name: Paket AnyKernel3
+        run: |
+          BOOT_DIR="${{ env.OUT_DIR }}/arch/arm64/boot"
+
+          cp -f "${BOOT_DIR}/Image.gz-dtb" ./AnyKernel3/
+          [ -f "${BOOT_DIR}/dtbo.img" ] && cp -f "${BOOT_DIR}/dtbo.img" ./AnyKernel3/
+
+          cd AnyKernel3/
+          zip -q -r "${{ github.workspace }}/${{ steps.meta.outputs.artifact_name }}.zip" *
+
+      # ------------------------------------------------------------------
+      # 10. UPLOAD ARTIFACT
+      #     Zip AnyKernel3 (siap flash) SELALU diupload apa pun pilihan
+      #     artifact_scope-nya.
+      #     "ringkas"  -> tambahan folder boot mentah (Image, Image.gz,
+      #                   Image.gz-dtb, dan folder dts/.../*.dtb di dalamnya)
+      #     "lengkap"  -> tambahan seluruh isi out/ seperti hasil build local
+      #                   (vmlinux, System.map, semua .o, dll). Bisa beberapa
+      #                   GB & lebih lama diupload. Folder boot mentah sudah
+      #                   ikut terangkut di dalam folder out/ ini juga.
+      # ------------------------------------------------------------------
+      - name: Upload AnyKernel3 (siap flash)
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.meta.outputs.artifact_name }}
+          path: ${{ github.workspace }}/${{ steps.meta.outputs.artifact_name }}.zip
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload kernel image (ringkas - folder boot)
+        if: ${{ (github.event.inputs.artifact_scope || 'ringkas') == 'ringkas' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.meta.outputs.artifact_name }}-boot
+          path: ${{ env.OUT_DIR }}/arch/arm64/boot
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload kernel build (lengkap, seluruh folder out / seperti build local)
+        if: ${{ github.event.inputs.artifact_scope == 'lengkap' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.meta.outputs.artifact_name }}-out
+          path: ${{ env.OUT_DIR }}
+          if-no-files-found: warn
+          retention-days: 7
+
+      # ------------------------------------------------------------------
+      # 10.5. UPLOAD LOG BUILD
+      #       Selalu jalan (always()) baik build sukses maupun gagal, supaya
+      #       log tetap bisa dicek kalau ada error. File log terpisah dari
+      #       zip kernel, jadi tidak mempengaruhi ukuran/isi artifact kernel.
+      # ------------------------------------------------------------------
+      - name: Upload log build
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.meta.outputs.artifact_name }}-log
+          path: ${{ github.workspace }}/build.log
+          if-no-files-found: warn
+          retention-days: 14
+
+      # ------------------------------------------------------------------
+      # 11. STEP SUMMARY
+      #     Tampilkan ringkasan build (waktu, defconfig, LTO) langsung di
+      #     halaman run GitHub Actions
+      # ------------------------------------------------------------------
+      - name: Build summary
+        if: always()
+        run: |
+          {
+            echo "## Ringkasan Build Kernel"
+            echo ""
+            echo "| Item | Nilai |"
+            echo "|---|---|"
+            echo "| Kernel repo | \`${{ github.event.inputs.kernel_repo || 'https://github.com/ardiantow7/android_kernel_xiaomi_sdm660_419' }}\` |"
+            echo "| Kernel branch | \`${{ github.event.inputs.kernel_branch || 'back' }}\` |"
+            echo "| Defconfig | \`${{ steps.build.outputs.defconfig }}\` |"
+            echo "| Toolchain | \`${{ steps.build.outputs.toolchain }}\` |"
+            echo "| Mode LTO | \`${{ steps.build.outputs.lto_mode }}\` |"
+            echo "| Build host | \`${{ steps.build.outputs.build_host }}\` |"
+            echo "| Build timestamp | \`${{ steps.build.outputs.build_timestamp }}\` |"
+            echo "| Waktu kompilasi | **${{ steps.build.outputs.duration_min }} menit ${{ steps.build.outputs.duration_sec }} detik** |"
+            echo "| Status | ${{ job.status }} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          
