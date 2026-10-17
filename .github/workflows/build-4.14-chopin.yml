@@ -11,7 +11,7 @@ on:
       kernel_branch:
         description: 'Branch pada repositori source kernel di atas'
         required: false
-        default: 'resukisu'
+        default: 'chopin_kvm'
         type: string
       defconfig:
         description: 'Defconfig yang dipakai'
@@ -103,7 +103,9 @@ env:
 
 jobs:
   build:
-    runs-on: ubuntu-22.04
+    # ubuntu-latest (glibc baru) dibutuhkan Neutron Clang terbaru yang
+    # meminta glibc >= 2.38 (ubuntu-22.04 hanya 2.35).
+    runs-on: ubuntu-latest
     timeout-minutes: 350  # batas runner free 6 jam, beri margin
 
     steps:
@@ -117,7 +119,7 @@ jobs:
       - name: Clone sumber kernel
         run: |
           git clone --recursive --depth=1 -j "$(nproc)" \
-            --branch "${{ github.event.inputs.kernel_branch || 'resukisu' }}" \
+            --branch "${{ github.event.inputs.kernel_branch || 'chopin_kvm' }}" \
             "${{ github.event.inputs.kernel_repo || 'https://github.com/kucingoranye/kernel_mt6893' }}" \
             "${{ env.KERNEL_DIR }}"
 
@@ -532,7 +534,7 @@ jobs:
           # Format: kernel-4.14-chopin-{branch kernel}-{run_number}-{tanggal}
           # Slash di nama branch diganti "-" karena nama artifact tidak
           # boleh mengandung "/".
-          BRANCH_NAME="${{ github.event.inputs.kernel_branch || 'resukisu' }}"
+          BRANCH_NAME="${{ github.event.inputs.kernel_branch || 'chopin_kvm' }}"
           BRANCH_SAFE="${BRANCH_NAME//\//-}"
           TANGGAL=$(date +'%d%m%Y')
           echo "artifact_name=kernel-4.14-chopin-${BRANCH_SAFE}-${{ github.run_number }}-${TANGGAL}" >> "$GITHUB_OUTPUT"
@@ -804,7 +806,7 @@ jobs:
             echo "|---|---|"
             echo "| Device | chopin (Dimensity 1100) |"
             echo "| Kernel repo | \`${{ github.event.inputs.kernel_repo || 'https://github.com/kucingoranye/kernel_mt6893' }}\` |"
-            echo "| Kernel branch | \`${{ github.event.inputs.kernel_branch || 'resukisu' }}\` |"
+            echo "| Kernel branch | \`${{ github.event.inputs.kernel_branch || 'chopin_kvm' }}\` |"
             echo "| Defconfig | \`${{ steps.build.outputs.defconfig }}\` |"
             echo "| Toolchain | \`${{ steps.build.outputs.toolchain }}\` |"
             echo "| Mode LTO | \`${{ steps.build.outputs.lto_mode }}\` |"
