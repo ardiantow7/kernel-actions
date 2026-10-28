@@ -32,7 +32,7 @@ on:
       lto_mode:
         description: 'Mode LTO (thin/full/none = tanpa LTO)'
         required: false
-        default: 'thin'
+        default: 'none'
         type: choice
         options:
           - thin
@@ -42,9 +42,9 @@ on:
         description: 'Integrasikan Droidspaces (patch resmi + konfigurasi kernel)?'
         required: true
         type: boolean
-        default: true
+        default: false
       build_type:
-        description: 'Jenis build: no_root (default kernel, tidak ada yang diubah) atau bakasu (jalankan setup BakaSU)'
+        description: 'Jenis build'
         required: false
         default: 'no_root'
         type: choice
@@ -52,7 +52,7 @@ on:
           - no_root
           - bakasu
       hook_type:
-        description: '[BakaSU] Jenis hook: default (tidak diubah) atau knight (terapkan hook-type.patch)'
+        description: 'Jenis hook'
         required: false
         default: 'default'
         type: choice
@@ -60,7 +60,7 @@ on:
           - default
           - knight
       ksu_manager:
-        description: '[BakaSU] KSU manager: default (tidak diubah) atau multi_manager (terapkan multi-manager.patch)'
+        description: 'KSU manager'
         required: false
         default: 'default'
         type: choice
@@ -68,7 +68,7 @@ on:
           - default
           - multi_manager
       hook_detect:
-        description: '[BakaSU] Deteksi hook: default (tidak diubah) atau ksu_next (terapkan ksun-hook-detect.patch)'
+        description: 'Deteksi hook'
         required: false
         default: 'default'
         type: choice
@@ -76,13 +76,21 @@ on:
           - default
           - ksu_next
       nomount:
-        description: '[BakaSU] NoMount: tidak (tidak diubah) atau iya (jalankan setup NoMount)'
+        description: 'NoMount'
         required: false
         default: 'tidak'
         type: choice
         options:
           - tidak
           - iya
+      banner:
+        description: 'Banner'
+        required: false
+        default: 'rilis'
+        type: choice
+        options:
+          - rilis
+          - test
       artifact_scope:
         description: 'File tambahan yang diupload sebagai artifact (zip AnyKernel3 selalu diupload)'
         required: false
@@ -115,6 +123,10 @@ env:
   OUT_DIR: ${{ github.workspace }}/kernel/out
 
   ANYKERNEL_REPO: https://github.com/osm0sis/AnyKernel3
+
+  # Sumber file patch (hook-type, multi-manager, ksun-hook-detect) -
+  # diunduh langsung dari repo ini (raw URL).
+  PATCH_RAW_URL: https://raw.githubusercontent.com/ardiantow7/patch/main
 
   # --- Sumber tiap toolchain ---
   # proton13 -> Proton Clang (kdrag0n), rilis terakhir = Clang 13.0.0 (20210522)
@@ -164,20 +176,6 @@ jobs:
             "${{ env.KERNEL_DIR }}"
 
       # ------------------------------------------------------------------
-      # 1.5. AMBIL FILE PATCH DARI REPO BUILD (hanya untuk build BakaSU)
-      #      Workflow ini tidak otomatis checkout repo tempat dia berada,
-      #      jadi folder patches/ (hook-type.patch, multi-manager.patch,
-      #      ksun-hook-detect.patch) diambil lewat sparse checkout ke
-      #      folder terpisah: <workspace>/build-repo/patches
-      # ------------------------------------------------------------------
-      - name: Ambil patch dari repo build
-        if: ${{ (github.event.inputs.build_type || 'no_root') == 'bakasu' }}
-        uses: actions/checkout@v5
-        with:
-          path: build-repo
-          sparse-checkout: patches
-
-      # ------------------------------------------------------------------
       # 2. CEK SISA DISK
       # ------------------------------------------------------------------
       - name: Cek sisa disk
@@ -188,7 +186,7 @@ jobs:
       # ------------------------------------------------------------------
       - name: Setup swap tambahan
         run: |
-          LTO_MODE="${{ github.event.inputs.lto_mode || 'thin' }}"
+          LTO_MODE="${{ github.event.inputs.lto_mode || 'none' }}"
 
           if [ "$LTO_MODE" = "full" ]; then
             SWAP_SIZE="8G"
@@ -353,9 +351,9 @@ jobs:
         uses: actions/cache@v5
         with:
           path: ~/.ccache
-          key: ccache-chopin414-${{ steps.tcver.outputs.toolchain }}-${{ github.event.inputs.lto_mode || 'thin' }}-${{ github.event.inputs.defconfig || 'chopin_defconfig' }}-${{ github.run_id }}
+          key: ccache-chopin414-${{ steps.tcver.outputs.toolchain }}-${{ github.event.inputs.lto_mode || 'none' }}-${{ github.event.inputs.defconfig || 'chopin_defconfig' }}-${{ github.run_id }}
           restore-keys: |
-            ccache-chopin414-${{ steps.tcver.outputs.toolchain }}-${{ github.event.inputs.lto_mode || 'thin' }}-${{ github.event.inputs.defconfig || 'chopin_defconfig' }}-
+            ccache-chopin414-${{ steps.tcver.outputs.toolchain }}-${{ github.event.inputs.lto_mode || 'none' }}-${{ github.event.inputs.defconfig || 'chopin_defconfig' }}-
 
       - name: Setup ccache
         run: |
@@ -438,11 +436,50 @@ jobs:
                          @knight_kernel                 
           EOF
 
+          # Banner test (ditanam di script). Dipilih lewat input "banner":
+          #   rilis = banner.txt di atas, test = banner-test.txt di bawah ini.
+          #   Isinya sama persis dengan file banner-test.txt (spasi dipertahankan).
+          cat << 'EOF' > "$RUNNER_TEMP/banner-test.txt"
+           
+                        /\  /\  /\  /\  /\              
+                        <>  <>  <>  <>  <>              
+                        ==================              
+           
+                     Knight kernel test chopin           
+                    by @ardiantowb on telegram          
+               
+                              ______                    
+                             /      \                   
+                            /        \                  
+                            |        |                  
+                             \      /                   
+                              \    /                    
+                               \  /                     
+                                \/                      
+               
+                      Backup before flashing                 
+          EOF
+
+          BANNER_MODE="${{ github.event.inputs.banner || 'rilis' }}"
+          case "$BANNER_MODE" in
+            rilis)
+              echo "Banner: rilis (banner.txt bawaan script)"
+              ;;
+            test)
+              echo "Banner: test (banner-test.txt)"
+              cp -f "$RUNNER_TEMP/banner-test.txt" AnyKernel3/tools/banner.txt
+              ;;
+            *)
+              echo "::error::Pilihan banner tidak dikenali: $BANNER_MODE"
+              exit 1
+              ;;
+          esac
+
       # ------------------------------------------------------------------
       # 9.5. INTEGRASI DROIDSPACES (opsional)
       # ------------------------------------------------------------------
       - name: Integrasi Droidspaces
-        if: ${{ github.event.inputs.droidspaces_enabled != 'false' }}
+        if: ${{ github.event.inputs.droidspaces_enabled == 'true' }}
         working-directory: ${{ env.KERNEL_DIR }}
         run: |
           set -euo pipefail
@@ -585,8 +622,12 @@ jobs:
       #         -> NoMount -> (lanjut ke step Build kernel)
       #       Jika build_type = no_root, step ini dilewati total dan
       #       kernel dibuild apa adanya sesuai konfigurasi kernel.
-      #       Semua patch dijalankan dari root source kernel (-p1) dan
-      #       harus sudah ada setelah setup BakaSU (folder KernelSU/).
+      #       File .patch (hook-type, multi-manager, ksun-hook-detect)
+      #       diunduh dari $PATCH_RAW_URL, hanya yang dipilih di menu.
+      #       Semua patch dijalankan dari root source kernel (-p1) setelah
+      #       setup BakaSU membuat folder KernelSU/.
+      #       Output step ini ikut dicatat ke build.log supaya log tetap
+      #       ter-upload walaupun step ini yang gagal.
       # ------------------------------------------------------------------
       - name: Integrasi BakaSU
         if: ${{ (github.event.inputs.build_type || 'no_root') == 'bakasu' }}
@@ -594,80 +635,86 @@ jobs:
         run: |
           set -euo pipefail
 
-          PATCH_DIR="${{ github.workspace }}/build-repo/patches"
+          LOG_FILE="${{ github.workspace }}/build.log"
+          PATCH_DIR="${{ runner.temp }}/bakasu-patches"
           HOOK_TYPE="${{ github.event.inputs.hook_type || 'default' }}"
           KSU_MANAGER="${{ github.event.inputs.ksu_manager || 'default' }}"
           HOOK_DETECT="${{ github.event.inputs.hook_detect || 'default' }}"
           NOMOUNT="${{ github.event.inputs.nomount || 'tidak' }}"
 
-          echo "=== BakaSU | hook_type=$HOOK_TYPE | ksu_manager=$KSU_MANAGER | hook_detect=$HOOK_DETECT | nomount=$NOMOUNT ==="
+          mkdir -p "$PATCH_DIR"
 
-          # Terapkan 1 patch (idempotent):
-          #   - sudah diterapkan -> lewati
-          #   - bisa diterapkan  -> terapkan
-          #   - selain itu       -> konflik, gagalkan build
-          apply_patch() {
-            local name="$1"
-            local file="$PATCH_DIR/$name"
-            if [ ! -f "$file" ]; then
-              echo "::error::File patch tidak ditemukan: $file (taruh di folder patches/ pada repo build)"
+          {
+            echo "=== BakaSU | hook_type=$HOOK_TYPE | ksu_manager=$KSU_MANAGER | hook_detect=$HOOK_DETECT | nomount=$NOMOUNT ==="
+
+            # Terapkan 1 patch (idempotent):
+            #   - sudah diterapkan -> lewati
+            #   - bisa diterapkan  -> terapkan
+            #   - selain itu       -> konflik, gagalkan build
+            apply_patch() {
+              local name="$1"
+              local file="$PATCH_DIR/$name"
+              echo "Mengunduh patch: $PATCH_RAW_URL/$name"
+              if ! curl -fLSs "$PATCH_RAW_URL/$name" -o "$file"; then
+                echo "::error::Gagal mengunduh patch $name dari $PATCH_RAW_URL (pastikan file ada di repo patch)"
+                exit 1
+              fi
+              if patch -p1 -R --dry-run -s -f < "$file" >/dev/null 2>&1; then
+                echo "Sudah diterapkan, lewati: $name"
+                return 0
+              fi
+              if patch -p1 --dry-run -s -f < "$file" >/dev/null 2>&1; then
+                patch -p1 -s -f < "$file"
+                echo "Berhasil diterapkan: $name"
+                return 0
+              fi
+              echo "::error::Patch tidak bisa diterapkan (konflik / source berubah): $name"
+              patch -p1 --dry-run -f < "$file" || true
+              exit 1
+            }
+
+            # 0) Setup BakaSU (dijalankan sebelum build, sebelum patch apa pun)
+            echo "--- Setup BakaSU ---"
+            curl -fLSs "https://raw.githubusercontent.com/Baka-SU/BakaSU/main/kernel/setup.sh" | bash
+
+            if [ ! -d KernelSU ]; then
+              echo "::error::Folder KernelSU tidak ada setelah setup BakaSU - patch tidak bisa diterapkan"
               exit 1
             fi
-            if patch -p1 -R --dry-run -s -f < "$file" >/dev/null 2>&1; then
-              echo "Sudah diterapkan, lewati: $name"
-              return 0
-            fi
-            if patch -p1 --dry-run -s -f < "$file" >/dev/null 2>&1; then
-              patch -p1 -s -f < "$file"
-              echo "Berhasil diterapkan: $name"
-              return 0
-            fi
-            echo "::error::Patch tidak bisa diterapkan (konflik / source berubah): $name"
-            patch -p1 --dry-run -f < "$file" || true
-            exit 1
-          }
 
-          # 0) Setup BakaSU (dijalankan sebelum build, sebelum patch apa pun)
-          echo "--- Setup BakaSU ---"
-          curl -fLSs "https://raw.githubusercontent.com/Baka-SU/BakaSU/main/kernel/setup.sh" | bash
+            # a) Jenis hook
+            case "$HOOK_TYPE" in
+              default) echo "Jenis hook: default (tidak ada yang diubah)" ;;
+              knight)  echo "Jenis hook: Knight"; apply_patch hook-type.patch ;;
+              *) echo "::error::Jenis hook tidak dikenali: $HOOK_TYPE"; exit 1 ;;
+            esac
 
-          if [ ! -d KernelSU ]; then
-            echo "::error::Folder KernelSU tidak ada setelah setup BakaSU - patch tidak bisa diterapkan"
-            exit 1
-          fi
+            # b) KSU manager
+            case "$KSU_MANAGER" in
+              default)       echo "KSU manager: default (tidak ada yang diubah)" ;;
+              multi_manager) echo "KSU manager: multi manager"; apply_patch multi-manager.patch ;;
+              *) echo "::error::KSU manager tidak dikenali: $KSU_MANAGER"; exit 1 ;;
+            esac
 
-          # a) Jenis hook
-          case "$HOOK_TYPE" in
-            default) echo "Jenis hook: default (tidak ada yang diubah)" ;;
-            knight)  echo "Jenis hook: Knight"; apply_patch hook-type.patch ;;
-            *) echo "::error::Jenis hook tidak dikenali: $HOOK_TYPE"; exit 1 ;;
-          esac
+            # c) Deteksi hook
+            case "$HOOK_DETECT" in
+              default)  echo "Deteksi hook: default (tidak ada yang diubah)" ;;
+              ksu_next) echo "Deteksi hook: KSU Next"; apply_patch ksun-hook-detect.patch ;;
+              *) echo "::error::Deteksi hook tidak dikenali: $HOOK_DETECT"; exit 1 ;;
+            esac
 
-          # b) KSU manager
-          case "$KSU_MANAGER" in
-            default)       echo "KSU manager: default (tidak ada yang diubah)" ;;
-            multi_manager) echo "KSU manager: multi manager"; apply_patch multi-manager.patch ;;
-            *) echo "::error::KSU manager tidak dikenali: $KSU_MANAGER"; exit 1 ;;
-          esac
+            # d) NoMount
+            case "$NOMOUNT" in
+              tidak) echo "NoMount: tidak (tidak ada yang diubah)" ;;
+              iya)
+                echo "NoMount: iya"
+                curl -fLSs "https://raw.githubusercontent.com/maxsteeel/nomount/refs/heads/dev/kernel/setup.sh" | bash -
+                ;;
+              *) echo "::error::Pilihan NoMount tidak dikenali: $NOMOUNT"; exit 1 ;;
+            esac
 
-          # c) Deteksi hook
-          case "$HOOK_DETECT" in
-            default) echo "Deteksi hook: default (tidak ada yang diubah)" ;;
-            ksu_next) echo "Deteksi hook: KSU Next"; apply_patch ksun-hook-detect.patch ;;
-            *) echo "::error::Deteksi hook tidak dikenali: $HOOK_DETECT"; exit 1 ;;
-          esac
-
-          # d) NoMount
-          case "$NOMOUNT" in
-            tidak) echo "NoMount: tidak (tidak ada yang diubah)" ;;
-            iya)
-              echo "NoMount: iya"
-              curl -fLSs "https://raw.githubusercontent.com/maxsteeel/nomount/refs/heads/dev/kernel/setup.sh" | bash -
-              ;;
-            *) echo "::error::Pilihan NoMount tidak dikenali: $NOMOUNT"; exit 1 ;;
-          esac
-
-          echo "Integrasi BakaSU selesai - lanjut ke build kernel"
+            echo "Integrasi BakaSU selesai - lanjut ke build kernel"
+          } 2>&1 | tee -a "$LOG_FILE"
 
       # ------------------------------------------------------------------
       # 9.6. SIAPKAN NAMA ARTIFACT
@@ -676,13 +723,12 @@ jobs:
         id: meta
         if: always()
         run: |
-          # Format: kernel-4.14-chopin-{branch kernel}-{run_number}-{tanggal}
+          # Format: chopin-{nama branch kernel}-{nomor build}
           # Slash di nama branch diganti "-" karena nama artifact tidak
           # boleh mengandung "/".
           BRANCH_NAME="${{ github.event.inputs.kernel_branch || 'chopin_kvm' }}"
           BRANCH_SAFE="${BRANCH_NAME//\//-}"
-          TANGGAL=$(date +'%d%m%Y')
-          echo "artifact_name=kernel-4.14-chopin-${BRANCH_SAFE}-${{ github.run_number }}-${TANGGAL}" >> "$GITHUB_OUTPUT"
+          echo "artifact_name=chopin-${BRANCH_SAFE}-${{ github.run_number }}" >> "$GITHUB_OUTPUT"
 
       # ------------------------------------------------------------------
       # 10. BUILD KERNEL (dengan timer)
@@ -696,7 +742,7 @@ jobs:
           mkdir -p "$OUT_DIR"
 
           DEFCONFIG="${{ github.event.inputs.defconfig || 'chopin_defconfig' }}"
-          LTO_MODE="${{ github.event.inputs.lto_mode || 'thin' }}"
+          LTO_MODE="${{ github.event.inputs.lto_mode || 'none' }}"
           TOOLCHAIN="${{ steps.tcver.outputs.toolchain }}"
 
           # --- Host & timestamp build (custom, default timezone UTC) ---
@@ -775,7 +821,7 @@ jobs:
           LOG_FILE="${{ github.workspace }}/build.log"
 
           # --- Generate defconfig ---
-          make O="$OUT_DIR" "${TOOLCHAIN_ARGS[@]}" "$DEFCONFIG" 2>&1 | tee "$LOG_FILE"
+          make O="$OUT_DIR" "${TOOLCHAIN_ARGS[@]}" "$DEFCONFIG" 2>&1 | tee -a "$LOG_FILE"
 
           # --- Terapkan mode LTO ke .config ---
           # Di kernel 4.14 LTO dipilih lewat Kconfig (bukan variabel make
@@ -903,8 +949,11 @@ jobs:
       - name: Upload AnyKernel3 (siap flash)
         uses: actions/upload-artifact@v7
         with:
-          name: ${{ steps.meta.outputs.artifact_name }}
+          # archive: false = file .zip diupload langsung, tidak dibungkus
+          # zip lagi. Nama artifact otomatis = nama file (input "name"
+          # diabaikan oleh action).
           path: ${{ github.workspace }}/${{ steps.meta.outputs.artifact_name }}.zip
+          archive: false
           if-no-files-found: error
           retention-days: 14
 
@@ -956,6 +1005,7 @@ jobs:
             echo "| Toolchain | \`${{ steps.build.outputs.toolchain }}\` |"
             echo "| Mode LTO | \`${{ steps.build.outputs.lto_mode }}\` |"
             echo "| Droidspaces | ${{ github.event.inputs.droidspaces_enabled }} |"
+            echo "| Banner | \`${{ github.event.inputs.banner || 'rilis' }}\` |"
             echo "| Jenis build | \`${{ github.event.inputs.build_type || 'no_root' }}\` |"
             echo "| Hook type | \`${{ (github.event.inputs.build_type == 'bakasu' && (github.event.inputs.hook_type || 'default')) || '-' }}\` |"
             echo "| KSU manager | \`${{ (github.event.inputs.build_type == 'bakasu' && (github.event.inputs.ksu_manager || 'default')) || '-' }}\` |"
