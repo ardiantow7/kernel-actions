@@ -11,7 +11,7 @@ on:
       kernel_branch:
         description: 'Branch pada repositori source kernel di atas'
         required: false
-        default: 'chopin_kvm'
+        default: 'chopin'
         type: string
       defconfig:
         description: 'Defconfig yang dipakai'
@@ -51,6 +51,18 @@ on:
         options:
           - no_root
           - bakasu
+          - sukisu
+          - kernelsu-next
+          - ksu-backslashxx
+      ksu_version:
+        description: 'Versi KSU'
+        required: false
+        default: 'default'
+        type: choice
+        options:
+          - default
+          - kbuild-bakasu
+          - kbuild-ksun
       hook_type:
         description: 'Jenis hook'
         required: false
@@ -58,7 +70,9 @@ on:
         type: choice
         options:
           - default
-          - knight
+          - knight-bakasu
+          - knight-ksun
+          - knight-sukisu
       ksu_manager:
         description: 'KSU manager'
         required: false
@@ -66,7 +80,8 @@ on:
         type: choice
         options:
           - default
-          - multi_manager
+          - multi_manager-bakasu
+          - multi_manager-sukisu
       hook_detect:
         description: 'Deteksi hook'
         required: false
@@ -124,8 +139,9 @@ env:
 
   ANYKERNEL_REPO: https://github.com/osm0sis/AnyKernel3
 
-  # Sumber file patch (hook-type, multi-manager, ksun-hook-detect) -
-  # diunduh langsung dari repo ini (raw URL).
+  # Sumber file patch (kbuild, hook-type, multi-manager, ksun-hook-detect,
+  # termasuk subfolder ksun/ dan sukisu/) - diunduh langsung dari repo ini
+  # (raw URL).
   PATCH_RAW_URL: https://raw.githubusercontent.com/ardiantow7/patch/main
 
   # --- Sumber tiap toolchain ---
@@ -171,7 +187,7 @@ jobs:
       - name: Clone sumber kernel
         run: |
           git clone --recursive --depth=1 -j "$(nproc)" \
-            --branch "${{ github.event.inputs.kernel_branch || 'chopin_kvm' }}" \
+            --branch "${{ github.event.inputs.kernel_branch || 'chopin' }}" \
             "${{ github.event.inputs.kernel_repo || 'https://github.com/kucingoranye/kernel_mt6893' }}" \
             "${{ env.KERNEL_DIR }}"
 
@@ -616,27 +632,35 @@ jobs:
           echo "Konfigurasi Droidspaces sudah ditambahkan ke $DEFCONFIG"
 
       # ------------------------------------------------------------------
-      # 9.55. INTEGRASI BAKASU (opsional, hanya jika build_type = bakasu)
+      # 9.55. INTEGRASI KSU (opsional, hanya jika build_type bukan no_root)
       #       Urutan mengikuti menu:
-      #         setup BakaSU -> hook type -> KSU manager -> deteksi hook
-      #         -> NoMount -> (lanjut ke step Build kernel)
+      #         setup KSU (sesuai jenis build) -> versi KSU -> hook type
+      #         -> KSU manager -> deteksi hook -> NoMount
+      #         -> (lanjut ke step Build kernel)
+      #       Jenis build yang tersedia:
+      #         bakasu          -> setup.sh BakaSU
+      #         sukisu          -> setup.sh SukiSU-Ultra (builtin)
+      #         kernelsu-next   -> setup.sh KernelSU-Next (legacy)
+      #         ksu-backslashxx -> setup.sh backslashxx/KernelSU (master)
       #       Jika build_type = no_root, step ini dilewati total dan
       #       kernel dibuild apa adanya sesuai konfigurasi kernel.
-      #       File .patch (hook-type, multi-manager, ksun-hook-detect)
-      #       diunduh dari $PATCH_RAW_URL, hanya yang dipilih di menu.
-      #       Semua patch dijalankan dari root source kernel (-p1) setelah
-      #       setup BakaSU membuat folder KernelSU/.
+      #       File .patch (versi KSU, hook-type, multi-manager,
+      #       ksun-hook-detect) diunduh dari $PATCH_RAW_URL, hanya yang
+      #       dipilih di menu. Semua patch dijalankan dari root source
+      #       kernel (-p1) setelah setup KSU membuat folder KernelSU/.
       #       Output step ini ikut dicatat ke build.log supaya log tetap
       #       ter-upload walaupun step ini yang gagal.
       # ------------------------------------------------------------------
-      - name: Integrasi BakaSU
-        if: ${{ (github.event.inputs.build_type || 'no_root') == 'bakasu' }}
+      - name: Integrasi KSU
+        if: ${{ (github.event.inputs.build_type || 'no_root') != 'no_root' }}
         working-directory: ${{ env.KERNEL_DIR }}
         run: |
           set -euo pipefail
 
           LOG_FILE="${{ github.workspace }}/build.log"
-          PATCH_DIR="${{ runner.temp }}/bakasu-patches"
+          PATCH_DIR="${{ runner.temp }}/ksu-patches"
+          BUILD_TYPE="${{ github.event.inputs.build_type || 'no_root' }}"
+          KSU_VERSION="${{ github.event.inputs.ksu_version || 'default' }}"
           HOOK_TYPE="${{ github.event.inputs.hook_type || 'default' }}"
           KSU_MANAGER="${{ github.event.inputs.ksu_manager || 'default' }}"
           HOOK_DETECT="${{ github.event.inputs.hook_detect || 'default' }}"
@@ -645,15 +669,16 @@ jobs:
           mkdir -p "$PATCH_DIR"
 
           {
-            echo "=== BakaSU | hook_type=$HOOK_TYPE | ksu_manager=$KSU_MANAGER | hook_detect=$HOOK_DETECT | nomount=$NOMOUNT ==="
+            echo "=== KSU | build_type=$BUILD_TYPE | ksu_version=$KSU_VERSION | hook_type=$HOOK_TYPE | ksu_manager=$KSU_MANAGER | hook_detect=$HOOK_DETECT | nomount=$NOMOUNT ==="
 
-            # Terapkan 1 patch (idempotent):
+            # Terapkan 1 patch (idempotent). Argumen boleh berupa path
+            # relatif di repo patch (misal "ksun/kbuild-ksun.patch"):
             #   - sudah diterapkan -> lewati
             #   - bisa diterapkan  -> terapkan
             #   - selain itu       -> konflik, gagalkan build
             apply_patch() {
               local name="$1"
-              local file="$PATCH_DIR/$name"
+              local file="$PATCH_DIR/${name//\//_}"
               echo "Mengunduh patch: $PATCH_RAW_URL/$name"
               if ! curl -fLSs "$PATCH_RAW_URL/$name" -o "$file"; then
                 echo "::error::Gagal mengunduh patch $name dari $PATCH_RAW_URL (pastikan file ada di repo patch)"
@@ -673,37 +698,65 @@ jobs:
               exit 1
             }
 
-            # 0) Setup BakaSU (dijalankan sebelum build, sebelum patch apa pun)
-            echo "--- Setup BakaSU ---"
-            curl -fLSs "https://raw.githubusercontent.com/Baka-SU/BakaSU/main/kernel/setup.sh" | bash
+            # 0) Setup KSU (dijalankan sebelum build, sebelum patch apa pun)
+            case "$BUILD_TYPE" in
+              bakasu)
+                echo "--- Setup BakaSU ---"
+                curl -fLSs "https://raw.githubusercontent.com/Baka-SU/BakaSU/main/kernel/setup.sh" | bash
+                ;;
+              sukisu)
+                echo "--- Setup SukiSU ---"
+                curl -fLSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s builtin
+                ;;
+              kernelsu-next)
+                echo "--- Setup KernelSU-Next ---"
+                curl -fLSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s legacy
+                ;;
+              ksu-backslashxx)
+                echo "--- Setup KernelSU (backslashxx) ---"
+                curl -fLSs "https://raw.githubusercontent.com/backslashxx/KernelSU/refs/heads/master/kernel/setup.sh" | bash -s master
+                ;;
+              *) echo "::error::Jenis build tidak dikenali: $BUILD_TYPE"; exit 1 ;;
+            esac
 
             if [ ! -d KernelSU ]; then
-              echo "::error::Folder KernelSU tidak ada setelah setup BakaSU - patch tidak bisa diterapkan"
+              echo "::error::Folder KernelSU tidak ada setelah setup ($BUILD_TYPE) - patch tidak bisa diterapkan"
               exit 1
             fi
 
-            # a) Jenis hook
+            # a) Versi KSU
+            case "$KSU_VERSION" in
+              default)       echo "Versi KSU: default (tidak ada yang diubah)" ;;
+              kbuild-bakasu) echo "Versi KSU: kbuild-bakasu"; apply_patch kbuild.patch ;;
+              kbuild-ksun)   echo "Versi KSU: kbuild-ksun"; apply_patch ksun/kbuild-ksun.patch ;;
+              *) echo "::error::Versi KSU tidak dikenali: $KSU_VERSION"; exit 1 ;;
+            esac
+
+            # b) Jenis hook
             case "$HOOK_TYPE" in
-              default) echo "Jenis hook: default (tidak ada yang diubah)" ;;
-              knight)  echo "Jenis hook: Knight"; apply_patch hook-type.patch ;;
+              default)       echo "Jenis hook: default (tidak ada yang diubah)" ;;
+              knight-bakasu) echo "Jenis hook: Knight (BakaSU)"; apply_patch hook-type.patch ;;
+              knight-ksun)   echo "Jenis hook: Knight (KSU Next)"; apply_patch ksun/hook-type-ksun.patch ;;
+              knight-sukisu) echo "Jenis hook: Knight (SukiSU)"; apply_patch sukisu/hook-type-sukisu.patch ;;
               *) echo "::error::Jenis hook tidak dikenali: $HOOK_TYPE"; exit 1 ;;
             esac
 
-            # b) KSU manager
+            # c) KSU manager
             case "$KSU_MANAGER" in
-              default)       echo "KSU manager: default (tidak ada yang diubah)" ;;
-              multi_manager) echo "KSU manager: multi manager"; apply_patch multi-manager.patch ;;
+              default)              echo "KSU manager: default (tidak ada yang diubah)" ;;
+              multi_manager-bakasu) echo "KSU manager: multi manager (BakaSU)"; apply_patch multi-manager.patch ;;
+              multi_manager-sukisu) echo "KSU manager: multi manager (SukiSU)"; apply_patch sukisu/multi-manager-sukisu.patch ;;
               *) echo "::error::KSU manager tidak dikenali: $KSU_MANAGER"; exit 1 ;;
             esac
 
-            # c) Deteksi hook
+            # d) Deteksi hook
             case "$HOOK_DETECT" in
               default)  echo "Deteksi hook: default (tidak ada yang diubah)" ;;
               ksu_next) echo "Deteksi hook: KSU Next"; apply_patch ksun-hook-detect.patch ;;
               *) echo "::error::Deteksi hook tidak dikenali: $HOOK_DETECT"; exit 1 ;;
             esac
 
-            # d) NoMount
+            # e) NoMount
             case "$NOMOUNT" in
               tidak) echo "NoMount: tidak (tidak ada yang diubah)" ;;
               iya)
@@ -713,7 +766,7 @@ jobs:
               *) echo "::error::Pilihan NoMount tidak dikenali: $NOMOUNT"; exit 1 ;;
             esac
 
-            echo "Integrasi BakaSU selesai - lanjut ke build kernel"
+            echo "Integrasi KSU selesai - lanjut ke build kernel"
           } 2>&1 | tee -a "$LOG_FILE"
 
       # ------------------------------------------------------------------
@@ -726,7 +779,7 @@ jobs:
           # Format: chopin-{nama branch kernel}-{nomor build}
           # Slash di nama branch diganti "-" karena nama artifact tidak
           # boleh mengandung "/".
-          BRANCH_NAME="${{ github.event.inputs.kernel_branch || 'chopin_kvm' }}"
+          BRANCH_NAME="${{ github.event.inputs.kernel_branch || 'chopin' }}"
           BRANCH_SAFE="${BRANCH_NAME//\//-}"
           echo "artifact_name=chopin-${BRANCH_SAFE}-${{ github.run_number }}" >> "$GITHUB_OUTPUT"
 
@@ -1000,17 +1053,18 @@ jobs:
             echo "|---|---|"
             echo "| Device | chopin (Dimensity 1100) |"
             echo "| Kernel repo | \`${{ github.event.inputs.kernel_repo || 'https://github.com/kucingoranye/kernel_mt6893' }}\` |"
-            echo "| Kernel branch | \`${{ github.event.inputs.kernel_branch || 'chopin_kvm' }}\` |"
+            echo "| Kernel branch | \`${{ github.event.inputs.kernel_branch || 'chopin' }}\` |"
             echo "| Defconfig | \`${{ steps.build.outputs.defconfig }}\` |"
             echo "| Toolchain | \`${{ steps.build.outputs.toolchain }}\` |"
             echo "| Mode LTO | \`${{ steps.build.outputs.lto_mode }}\` |"
             echo "| Droidspaces | ${{ github.event.inputs.droidspaces_enabled }} |"
             echo "| Banner | \`${{ github.event.inputs.banner || 'rilis' }}\` |"
             echo "| Jenis build | \`${{ github.event.inputs.build_type || 'no_root' }}\` |"
-            echo "| Hook type | \`${{ (github.event.inputs.build_type == 'bakasu' && (github.event.inputs.hook_type || 'default')) || '-' }}\` |"
-            echo "| KSU manager | \`${{ (github.event.inputs.build_type == 'bakasu' && (github.event.inputs.ksu_manager || 'default')) || '-' }}\` |"
-            echo "| Deteksi hook | \`${{ (github.event.inputs.build_type == 'bakasu' && (github.event.inputs.hook_detect || 'default')) || '-' }}\` |"
-            echo "| NoMount | \`${{ (github.event.inputs.build_type == 'bakasu' && (github.event.inputs.nomount || 'tidak')) || '-' }}\` |"
+            echo "| Versi KSU | \`${{ ((github.event.inputs.build_type || 'no_root') != 'no_root' && (github.event.inputs.ksu_version || 'default')) || '-' }}\` |"
+            echo "| Hook type | \`${{ ((github.event.inputs.build_type || 'no_root') != 'no_root' && (github.event.inputs.hook_type || 'default')) || '-' }}\` |"
+            echo "| KSU manager | \`${{ ((github.event.inputs.build_type || 'no_root') != 'no_root' && (github.event.inputs.ksu_manager || 'default')) || '-' }}\` |"
+            echo "| Deteksi hook | \`${{ ((github.event.inputs.build_type || 'no_root') != 'no_root' && (github.event.inputs.hook_detect || 'default')) || '-' }}\` |"
+            echo "| NoMount | \`${{ ((github.event.inputs.build_type || 'no_root') != 'no_root' && (github.event.inputs.nomount || 'tidak')) || '-' }}\` |"
             echo "| Build host | \`${{ steps.build.outputs.build_host }}\` |"
             echo "| Build timestamp | \`${{ steps.build.outputs.build_timestamp }}\` |"
             echo "| Waktu kompilasi | **${{ steps.build.outputs.duration_min }} menit ${{ steps.build.outputs.duration_sec }} detik** |"
