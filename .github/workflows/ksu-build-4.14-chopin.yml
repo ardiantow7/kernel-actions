@@ -28,16 +28,16 @@ on:
           - aosp17
           - aosp22
           - zyc14
-          - neutron
+          - neutron24
       lto_mode:
-        description: 'Mode LTO (thin/full/none = tanpa LTO)'
+        description: 'Mode LTO (none/thin/full)'
         required: false
         default: 'none'
         type: choice
         options:
+          - none
           - thin
           - full
-          - none
       droidspaces_enabled:
         description: 'Integrasikan Droidspaces (patch resmi + konfigurasi kernel)?'
         required: true
@@ -46,10 +46,10 @@ on:
       build_type:
         description: 'Jenis build'
         required: false
-        default: 'no_root'
+        default: 'default'
         type: choice
         options:
-          - no_root
+          - default
           - bakasu
           - sukisu
           - kernelsu-next
@@ -89,7 +89,7 @@ on:
         type: choice
         options:
           - default
-          - ksu_next
+          - ksun-for-bakasu
       nomount:
         description: 'NoMount'
         required: false
@@ -166,7 +166,7 @@ env:
   CODELINARO_CLANG_ARCHIVE: https://git.codelinaro.org/clo/la/kernelplatform/prebuilts-master/clang/host/linux-x86/-/archive/aosp-new/main-kernel-2026/linux-x86-aosp-new-main-kernel-2026.tar.gz
   # zyc14    -> ZyC Clang 14.0.6 (build 20260619)
   ZYC_CLANG_URL: https://github.com/ZyCromerZ/Clang/releases/download/14.0.6-20260619-release/Clang-14.0.6-20260619.tar.gz
-  # neutron  -> Neutron Clang, rilis 06092026
+  # neutron24 -> Neutron Clang, rilis 06092026
   NEUTRON_CLANG_URL: https://github.com/Neutron-Toolchains/clang-build-catalogue/releases/download/06092026/neutron-clang-06092026.tar.zst
 
 jobs:
@@ -254,7 +254,7 @@ jobs:
             zyc14)
               VER="14.0.6-20260619"
               ;;
-            neutron)
+            neutron24)
               VER="06092026"
               ;;
             *)
@@ -350,7 +350,7 @@ jobs:
               tar -xzf /tmp/clang.tar.gz -C "$TC_DIR"
               rm -f /tmp/clang.tar.gz
               ;;
-            neutron)
+            neutron24)
               echo "Mengunduh Neutron Clang..."
               curl -L --fail "$NEUTRON_CLANG_URL" -o /tmp/clang.tar.zst
               tar --zstd -xf /tmp/clang.tar.zst -C "$TC_DIR"
@@ -632,7 +632,7 @@ jobs:
           echo "Konfigurasi Droidspaces sudah ditambahkan ke $DEFCONFIG"
 
       # ------------------------------------------------------------------
-      # 9.55. INTEGRASI KSU (opsional, hanya jika build_type bukan no_root)
+      # 9.55. INTEGRASI KSU (opsional, hanya jika build_type bukan default)
       #       Urutan mengikuti menu:
       #         setup KSU (sesuai jenis build) -> versi KSU -> hook type
       #         -> KSU manager -> deteksi hook -> NoMount
@@ -642,24 +642,24 @@ jobs:
       #         sukisu          -> setup.sh SukiSU-Ultra (builtin)
       #         kernelsu-next   -> setup.sh KernelSU-Next (legacy)
       #         ksu-backslashxx -> setup.sh backslashxx/KernelSU (master)
-      #       Jika build_type = no_root, step ini dilewati total dan
+      #       Jika build_type = default, step ini dilewati total dan
       #       kernel dibuild apa adanya sesuai konfigurasi kernel.
       #       File .patch (versi KSU, hook-type, multi-manager,
       #       ksun-hook-detect) diunduh dari $PATCH_RAW_URL, hanya yang
       #       dipilih di menu. Semua patch dijalankan dari root source
-      #       kernel (-p1) setelah setup KSU membuat folder KernelSU/.
+      #       kernel (-p1) setelah setup KSU membuat folder KernelSU/ (atau KernelSU-Next/).
       #       Output step ini ikut dicatat ke build.log supaya log tetap
       #       ter-upload walaupun step ini yang gagal.
       # ------------------------------------------------------------------
       - name: Integrasi KSU
-        if: ${{ (github.event.inputs.build_type || 'no_root') != 'no_root' }}
+        if: ${{ (github.event.inputs.build_type || 'default') != 'default' }}
         working-directory: ${{ env.KERNEL_DIR }}
         run: |
           set -euo pipefail
 
           LOG_FILE="${{ github.workspace }}/build.log"
           PATCH_DIR="${{ runner.temp }}/ksu-patches"
-          BUILD_TYPE="${{ github.event.inputs.build_type || 'no_root' }}"
+          BUILD_TYPE="${{ github.event.inputs.build_type || 'default' }}"
           KSU_VERSION="${{ github.event.inputs.ksu_version || 'default' }}"
           HOOK_TYPE="${{ github.event.inputs.hook_type || 'default' }}"
           KSU_MANAGER="${{ github.event.inputs.ksu_manager || 'default' }}"
@@ -719,10 +719,21 @@ jobs:
               *) echo "::error::Jenis build tidak dikenali: $BUILD_TYPE"; exit 1 ;;
             esac
 
-            if [ ! -d KernelSU ]; then
-              echo "::error::Folder KernelSU tidak ada setelah setup ($BUILD_TYPE) - patch tidak bisa diterapkan"
+            # Nama folder hasil setup berbeda per jenis build: KernelSU-Next
+            # membuat "KernelSU-Next/", sedangkan yang lain membuat "KernelSU/".
+            # (patch di ksun/*.patch memang menarget KernelSU-Next/kernel/...)
+            case "$BUILD_TYPE" in
+              kernelsu-next) KSU_DIR="KernelSU-Next" ;;
+              *)             KSU_DIR="KernelSU" ;;
+            esac
+
+            if [ ! -d "$KSU_DIR" ]; then
+              echo "::error::Folder $KSU_DIR tidak ada setelah setup ($BUILD_TYPE) - patch tidak bisa diterapkan"
+              echo "Folder di root source kernel:"
+              ls -d -- */ 2>/dev/null || true
               exit 1
             fi
+            echo "Folder KSU terdeteksi: $KSU_DIR"
 
             # a) Versi KSU
             case "$KSU_VERSION" in
@@ -752,7 +763,7 @@ jobs:
             # d) Deteksi hook
             case "$HOOK_DETECT" in
               default)  echo "Deteksi hook: default (tidak ada yang diubah)" ;;
-              ksu_next) echo "Deteksi hook: KSU Next"; apply_patch ksun-hook-detect.patch ;;
+              ksun-for-bakasu) echo "Deteksi hook: KSUN for BakaSU"; apply_patch ksun-hook-detect.patch ;;
               *) echo "::error::Deteksi hook tidak dikenali: $HOOK_DETECT"; exit 1 ;;
             esac
 
@@ -1059,12 +1070,12 @@ jobs:
             echo "| Mode LTO | \`${{ steps.build.outputs.lto_mode }}\` |"
             echo "| Droidspaces | ${{ github.event.inputs.droidspaces_enabled }} |"
             echo "| Banner | \`${{ github.event.inputs.banner || 'rilis' }}\` |"
-            echo "| Jenis build | \`${{ github.event.inputs.build_type || 'no_root' }}\` |"
-            echo "| Versi KSU | \`${{ ((github.event.inputs.build_type || 'no_root') != 'no_root' && (github.event.inputs.ksu_version || 'default')) || '-' }}\` |"
-            echo "| Hook type | \`${{ ((github.event.inputs.build_type || 'no_root') != 'no_root' && (github.event.inputs.hook_type || 'default')) || '-' }}\` |"
-            echo "| KSU manager | \`${{ ((github.event.inputs.build_type || 'no_root') != 'no_root' && (github.event.inputs.ksu_manager || 'default')) || '-' }}\` |"
-            echo "| Deteksi hook | \`${{ ((github.event.inputs.build_type || 'no_root') != 'no_root' && (github.event.inputs.hook_detect || 'default')) || '-' }}\` |"
-            echo "| NoMount | \`${{ ((github.event.inputs.build_type || 'no_root') != 'no_root' && (github.event.inputs.nomount || 'tidak')) || '-' }}\` |"
+            echo "| Jenis build | \`${{ github.event.inputs.build_type || 'default' }}\` |"
+            echo "| Versi KSU | \`${{ ((github.event.inputs.build_type || 'default') != 'default' && (github.event.inputs.ksu_version || 'default')) || '-' }}\` |"
+            echo "| Hook type | \`${{ ((github.event.inputs.build_type || 'default') != 'default' && (github.event.inputs.hook_type || 'default')) || '-' }}\` |"
+            echo "| KSU manager | \`${{ ((github.event.inputs.build_type || 'default') != 'default' && (github.event.inputs.ksu_manager || 'default')) || '-' }}\` |"
+            echo "| Deteksi hook | \`${{ ((github.event.inputs.build_type || 'default') != 'default' && (github.event.inputs.hook_detect || 'default')) || '-' }}\` |"
+            echo "| NoMount | \`${{ ((github.event.inputs.build_type || 'default') != 'default' && (github.event.inputs.nomount || 'tidak')) || '-' }}\` |"
             echo "| Build host | \`${{ steps.build.outputs.build_host }}\` |"
             echo "| Build timestamp | \`${{ steps.build.outputs.build_timestamp }}\` |"
             echo "| Waktu kompilasi | **${{ steps.build.outputs.duration_min }} menit ${{ steps.build.outputs.duration_sec }} detik** |"
