@@ -1,0 +1,979 @@
+name: KSU Build Kernel 4.19 Chopin
+
+on:
+  workflow_dispatch:
+    inputs:
+      kernel_repo:
+        description: 'URL repositori source kernel yang akan di-build'
+        required: false
+        default: 'https://github.com/kucingoranye/kernel_xiaomi_mt6893_419'
+        type: string
+      kernel_branch:
+        description: 'Branch pada repositori source kernel di atas'
+        required: false
+        default: 'cp-cfg'
+        type: string
+      defconfig:
+        description: 'Defconfig yang dipakai'
+        required: false
+        default: 'chopin_defconfig'
+      toolchain:
+        description: 'Toolchain Clang yang dipakai'
+        required: false
+        default: 'aosp17'
+        type: choice
+        options:
+          - proton13
+          - aosp20
+          - aosp17
+          - aosp22
+          - zyc14
+          - neutron24
+      lto_mode:
+        description: 'Mode LTO (none/thin/full)'
+        required: false
+        default: 'none'
+        type: choice
+        options:
+          - none
+          - thin
+          - full
+      build_type:
+        description: 'Jenis build'
+        required: false
+        default: 'default'
+        type: choice
+        options:
+          - default
+          - bakasu
+          - sukisu
+          - kernelsu-next
+          - ksu-backslashxx
+      ksu_version:
+        description: 'Versi KSU'
+        required: false
+        default: 'default'
+        type: choice
+        options:
+          - default
+          - kbuild-bakasu
+          - kbuild-ksun
+      hook_type:
+        description: 'Jenis hook'
+        required: false
+        default: 'default'
+        type: choice
+        options:
+          - default
+          - knight-bakasu
+          - knight-ksun
+          - knight-sukisu
+      ksu_manager:
+        description: 'KSU manager'
+        required: false
+        default: 'default'
+        type: choice
+        options:
+          - default
+          - multi_manager-bakasu
+          - multi_manager-sukisu
+      hook_detect:
+        description: 'Deteksi hook'
+        required: false
+        default: 'default'
+        type: choice
+        options:
+          - default
+          - ksun-for-bakasu
+      nomount:
+        description: 'NoMount'
+        required: false
+        default: 'tidak'
+        type: choice
+        options:
+          - tidak
+          - iya
+      banner:
+        description: 'Banner'
+        required: false
+        default: 'rilis'
+        type: choice
+        options:
+          - rilis
+          - test
+      artifact_scope:
+        description: 'File tambahan yang diupload sebagai artifact (zip AnyKernel3 dan zip .config selalu diupload)'
+        required: false
+        default: 'ringkas'
+        type: choice
+        options:
+          - ringkas
+          - lengkap
+      kbuild_build_host:
+        description: 'Custom user@host (atau host saja), kosongkan untuk pakai default "builder@ardiantowb"'
+        required: false
+        type: string
+        default: ''
+      build_timezone:
+        description: 'Timezone (IANA) untuk timestamp build, misal Asia/Jakarta'
+        required: false
+        type: string
+        default: 'UTC'
+      kbuild_build_timestamp:
+        description: 'Custom KBUILD_BUILD_TIMESTAMP, kosongkan untuk pakai waktu build asli sesuai timezone di atas'
+        required: false
+        type: string
+        default: ''
+
+env:
+  KERNEL_DIR: ${{ github.workspace }}/kernel
+  KERNEL_DEVICE: chopin
+
+  TC_DIR: ${{ github.workspace }}/toolchain/clang
+  OUT_DIR: ${{ github.workspace }}/kernel/out
+
+  ANYKERNEL_REPO: https://github.com/osm0sis/AnyKernel3
+
+  # Sumber file patch (kbuild, hook-type, multi-manager, ksun-hook-detect,
+  # termasuk subfolder ksun/ dan sukisu/) - diunduh langsung dari repo ini
+  # (raw URL).
+  PATCH_RAW_URL: https://raw.githubusercontent.com/ardiantow7/patch/main
+
+  # --- Sumber tiap toolchain ---
+  # proton13 -> Proton Clang (kdrag0n), rilis terakhir = Clang 13.0.0 (20210522)
+  PROTON_CLANG_REPO: https://github.com/kdrag0n/proton-clang
+  # aosp20   -> AOSP Clang r547379 (Clang 20.0.0, dipakai untuk rilis Android 16)
+  AOSP_CLANG_URL: https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86
+  AOSP_CLANG_TAG: r547379
+  # aosp17   -> AOSP Clang r487747c (Clang 17.0.2, dipakai untuk rilis Android U) - default.
+  #             MLGO (ML-guided register allocation) dimatikan lewat flag
+  #             "-mllvm -regalloc-enable-advisor=default" saat build (lihat step
+  #             "Build kernel"). Versi ini sudah dihapus dari branch "main" upstream,
+  #             jadi diambil dari commit lama yang masih menyimpannya.
+  AOSP_CLANG17_TAG: r487747c
+  AOSP_CLANG17_COMMIT: 7f17fbadc9ee07a636afb6083bf84c481a7cc2ab
+  # aosp22   -> AOSP Clang r596125 (Clang 22.0.2). Sumber utama: situs resmi
+  #             Google (android.googlesource.com), dicoba dari branch "main" lalu
+  #             branch "mirror-goog-main-llvm-toolchain-source". Kalau keduanya
+  #             gagal/error, otomatis fallback ke mirror CodeLinaro. MLGO dimatikan
+  #             sama seperti aosp20/aosp17.
+  AOSP_CLANG22_TAG: r596125
+  CODELINARO_CLANG_ARCHIVE: https://git.codelinaro.org/clo/la/kernelplatform/prebuilts-master/clang/host/linux-x86/-/archive/aosp-new/main-kernel-2026/linux-x86-aosp-new-main-kernel-2026.tar.gz
+  # zyc14    -> ZyC Clang 14.0.6 (build 20260619)
+  ZYC_CLANG_URL: https://github.com/ZyCromerZ/Clang/releases/download/14.0.6-20260619-release/Clang-14.0.6-20260619.tar.gz
+  # neutron24 -> Neutron Clang, rilis 06092026
+  NEUTRON_CLANG_URL: https://github.com/Neutron-Toolchains/clang-build-catalogue/releases/download/06092026/neutron-clang-06092026.tar.zst
+
+jobs:
+  build:
+    # ubuntu-latest (glibc baru) dibutuhkan Neutron Clang terbaru yang
+    # meminta glibc >= 2.38 (ubuntu-22.04 hanya 2.35).
+    runs-on: ubuntu-latest
+    timeout-minutes: 350  # batas runner free 6 jam, beri margin
+
+    steps:
+      # ------------------------------------------------------------------
+      # 1. CLONE SUMBER KERNEL
+      #    Workflow ini terpisah dari repo kernel (ditaruh di repo build
+      #    khusus), jadi repo & branch kernel dipilih lewat input
+      #    kernel_repo/kernel_branch saat "Run workflow" - bukan lagi
+      #    otomatis checkout repo tempat workflow ini berada.
+      # ------------------------------------------------------------------
+      - name: Clone sumber kernel
+        run: |
+          git clone --recursive --depth=1 -j "$(nproc)" \
+            --branch "${{ github.event.inputs.kernel_branch || 'cp-cfg' }}" \
+            "${{ github.event.inputs.kernel_repo || 'https://github.com/kucingoranye/kernel_xiaomi_mt6893_419' }}" \
+            "${{ env.KERNEL_DIR }}"
+
+      # ------------------------------------------------------------------
+      # 2. CEK SISA DISK
+      # ------------------------------------------------------------------
+      - name: Cek sisa disk
+        run: df -h /
+
+      # ------------------------------------------------------------------
+      # 3. SWAP TAMBAHAN
+      # ------------------------------------------------------------------
+      - name: Setup swap tambahan
+        run: |
+          LTO_MODE="${{ github.event.inputs.lto_mode || 'none' }}"
+
+          if [ "$LTO_MODE" = "full" ]; then
+            SWAP_SIZE="8G"
+          else
+            SWAP_SIZE="4G"
+          fi
+
+          echo "Menambahkan swap ${SWAP_SIZE} (mode LTO: ${LTO_MODE})..."
+          sudo fallocate -l "$SWAP_SIZE" /swapfile_ci
+          sudo chmod 600 /swapfile_ci
+          sudo mkswap /swapfile_ci
+          sudo swapon /swapfile_ci
+          free -h
+
+      # ------------------------------------------------------------------
+      # 4. INSTALL DEPENDENCIES BUILD
+      #    git dibutuhkan juga untuk clone Proton Clang (opsi toolchain).
+      # ------------------------------------------------------------------
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            bc bison flex libssl-dev libfl-dev libelf-dev \
+            build-essential zip unzip curl git python3 \
+            python-is-python3 ccache llvm lld zstd \
+            gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi
+
+      # ------------------------------------------------------------------
+      # 5. TENTUKAN VERSI TOOLCHAIN (dipakai sebagai cache key)
+      # ------------------------------------------------------------------
+      - name: Tentukan versi toolchain
+        id: tcver
+        run: |
+          TOOLCHAIN="${{ github.event.inputs.toolchain || 'aosp17' }}"
+
+          case "$TOOLCHAIN" in
+            proton13)
+              VER="clang13-20210522"
+              ;;
+            aosp20)
+              VER="${AOSP_CLANG_TAG}"
+              ;;
+            aosp17)
+              VER="${AOSP_CLANG17_TAG}"
+              ;;
+            aosp22)
+              VER="${AOSP_CLANG22_TAG}"
+              ;;
+            zyc14)
+              VER="14.0.6-20260619"
+              ;;
+            neutron24)
+              VER="06092026"
+              ;;
+            *)
+              echo "Toolchain tidak dikenali: $TOOLCHAIN"
+              exit 1
+              ;;
+          esac
+
+          echo "toolchain=${TOOLCHAIN}" >> "$GITHUB_OUTPUT"
+          echo "ver=${VER}" >> "$GITHUB_OUTPUT"
+
+      # ------------------------------------------------------------------
+      # 6. CACHE TOOLCHAIN CLANG
+      #    (supaya tidak download/clone ulang setiap run)
+      # ------------------------------------------------------------------
+      - name: Cache toolchain
+        id: cache-toolchain
+        uses: actions/cache@v5
+        with:
+          path: ${{ env.TC_DIR }}
+          key: toolchain-${{ steps.tcver.outputs.toolchain }}-${{ steps.tcver.outputs.ver }}
+
+      - name: Download toolchain
+        if: steps.cache-toolchain.outputs.cache-hit != 'true'
+        run: |
+          TOOLCHAIN="${{ steps.tcver.outputs.toolchain }}"
+          mkdir -p "$TC_DIR"
+
+          case "$TOOLCHAIN" in
+            proton13)
+              echo "Mengkloning Proton Clang (Clang 13.0.0)..."
+              git clone --depth=1 "$PROTON_CLANG_REPO" "$TC_DIR"
+              ;;
+            aosp20)
+              echo "Mengunduh AOSP Clang ${AOSP_CLANG_TAG} (Clang 20.0.0)..."
+              curl -L --fail \
+                "${AOSP_CLANG_URL}/+archive/refs/heads/main/clang-${AOSP_CLANG_TAG}.tar.gz" \
+                -o /tmp/clang.tar.gz
+              tar -xzf /tmp/clang.tar.gz -C "$TC_DIR"
+              rm -f /tmp/clang.tar.gz
+              ;;
+            aosp17)
+              echo "Mengunduh AOSP Clang ${AOSP_CLANG17_TAG} (Clang 17.0.2, MLGO dimatikan saat build)..."
+              # Diambil dari commit lama (bukan "main") karena versi ini sudah
+              # dihapus dari branch main upstream.
+              curl -L --fail \
+                "${AOSP_CLANG_URL}/+archive/${AOSP_CLANG17_COMMIT}/clang-${AOSP_CLANG17_TAG}.tar.gz" \
+                -o /tmp/clang.tar.gz
+              tar -xzf /tmp/clang.tar.gz -C "$TC_DIR"
+              rm -f /tmp/clang.tar.gz
+              ;;
+            aosp22)
+              echo "Mengunduh AOSP Clang ${AOSP_CLANG22_TAG} (Clang 22.0.2, MLGO dimatikan saat build)..."
+              # Urutan sumber: (1) Google branch main, (2) Google branch
+              # mirror-goog-main-llvm-toolchain-source, (3) CodeLinaro (fallback).
+              # Isi arsip dinormalkan: cari bin/clang lalu jadikan induknya
+              # sebagai root toolchain, karena struktur arsip Gitiles (Google)
+              # dan GitLab (CodeLinaro) berbeda.
+              TMP_EXTRACT=/tmp/clang_extract
+              DL_OK=0
+              for URL in \
+                "${AOSP_CLANG_URL}/+archive/refs/heads/main/clang-${AOSP_CLANG22_TAG}.tar.gz" \
+                "${AOSP_CLANG_URL}/+archive/refs/heads/mirror-goog-main-llvm-toolchain-source/clang-${AOSP_CLANG22_TAG}.tar.gz" \
+                "${CODELINARO_CLANG_ARCHIVE}?path=clang-${AOSP_CLANG22_TAG}"; do
+                echo "Mencoba: $URL"
+                rm -rf "$TMP_EXTRACT" /tmp/clang.tar.gz
+                mkdir -p "$TMP_EXTRACT"
+                if curl -L --fail --retry 3 --retry-delay 5 "$URL" -o /tmp/clang.tar.gz \
+                   && tar -xzf /tmp/clang.tar.gz -C "$TMP_EXTRACT"; then
+                  CLANG_BIN="$(find "$TMP_EXTRACT" -maxdepth 4 \( -type f -o -type l \) -path '*/bin/clang' | head -n1)"
+                  if [ -n "$CLANG_BIN" ]; then
+                    CLANG_ROOT="$(dirname "$(dirname "$CLANG_BIN")")"
+                    rm -rf "$TC_DIR"
+                    mv "$CLANG_ROOT" "$TC_DIR"
+                    DL_OK=1
+                    echo "Berhasil dari: $URL"
+                    break
+                  fi
+                  echo "bin/clang tidak ditemukan di arsip, coba sumber berikutnya..."
+                else
+                  echo "Gagal mengunduh/mengekstrak, coba sumber berikutnya..."
+                fi
+              done
+              rm -rf "$TMP_EXTRACT" /tmp/clang.tar.gz
+              if [ "$DL_OK" != 1 ]; then
+                echo "::error::Semua sumber AOSP Clang ${AOSP_CLANG22_TAG} gagal diunduh"
+                exit 1
+              fi
+              ;;
+            zyc14)
+              echo "Mengunduh ZyC Clang 14.0.6..."
+              curl -L --fail "$ZYC_CLANG_URL" -o /tmp/clang.tar.gz
+              tar -xzf /tmp/clang.tar.gz -C "$TC_DIR"
+              rm -f /tmp/clang.tar.gz
+              ;;
+            neutron24)
+              echo "Mengunduh Neutron Clang..."
+              curl -L --fail "$NEUTRON_CLANG_URL" -o /tmp/clang.tar.zst
+              tar --zstd -xf /tmp/clang.tar.zst -C "$TC_DIR"
+              rm -f /tmp/clang.tar.zst
+              ;;
+          esac
+
+      # ------------------------------------------------------------------
+      # 7. CACHE CCACHE (mempercepat rebuild berikutnya)
+      #    Key ikut membedakan toolchain, supaya objek cache dari clang
+      #    yang berbeda tidak tercampur.
+      # ------------------------------------------------------------------
+      - name: Cache ccache
+        uses: actions/cache@v5
+        with:
+          path: ~/.ccache
+          key: ccache-chopin419-${{ steps.tcver.outputs.toolchain }}-${{ github.event.inputs.lto_mode || 'none' }}-${{ github.event.inputs.defconfig || 'chopin_defconfig' }}-${{ github.run_id }}
+          restore-keys: |
+            ccache-chopin419-${{ steps.tcver.outputs.toolchain }}-${{ github.event.inputs.lto_mode || 'none' }}-${{ github.event.inputs.defconfig || 'chopin_defconfig' }}-
+
+      - name: Setup ccache
+        run: |
+          export CCACHE_DIR=~/.ccache
+          ccache -M 5G
+          ccache -z
+
+      # ------------------------------------------------------------------
+      # 8. SETUP TOOLCHAIN ENV
+      # ------------------------------------------------------------------
+      - name: Setup toolchain PATH
+        run: echo "$TC_DIR/bin" >> "$GITHUB_PATH"
+
+      - name: Show toolchain info
+        run: |
+          which clang
+          clang --version
+
+      # ------------------------------------------------------------------
+      # 9. SIAPKAN ANYKERNEL3
+      # ------------------------------------------------------------------
+      - name: Siapkan AnyKernel3
+        run: |
+          # Selalu pakai branch "master" AnyKernel3 (osm0sis/AnyKernel3),
+          # tidak lagi bisa dipilih lewat input workflow.
+          git clone --recursive --depth=1 --branch master \
+            "${{ env.ANYKERNEL_REPO }}" AnyKernel3
+
+          rm -f AnyKernel3/anykernel.sh
+          cat << 'EOF' > AnyKernel3/anykernel.sh
+          properties() { '
+          kernel.string=Welcome to Knight kernel
+          do.devicecheck=0
+          do.modules=0
+          do.systemless=1
+          do.cleanup=1
+          do.cleanuponabort=0
+          '; }
+
+          BLOCK=auto;
+          IS_SLOT_DEVICE=auto;
+          RAMDISK_COMPRESSION=auto;
+          PATCH_VBMETA_FLAG=auto;
+
+          . tools/ak3-core.sh;
+
+          if [ -f tools/banner.txt ]; then
+            while IFS= read -r bannerline || [ -n "$bannerline" ]; do
+              ui_print "$bannerline";
+            done < tools/banner.txt;
+          fi;
+
+          split_boot;
+          flash_boot;
+          EOF
+
+          mkdir -p AnyKernel3/tools
+          cat << 'EOF' > AnyKernel3/tools/banner.txt
+           
+                        /\  /\  /\  /\  /\              
+                        <>  <>  <>  <>  <>              
+                        ==================              
+           
+                     Knight kernel for chopin           
+                    by @ardiantowb on telegram          
+           
+                              ______                    
+                             /      \                   
+                            /        \                  
+                            |        |                  
+                             \      /                   
+                              \    /                    
+                               \  /                     
+                                \/                      
+           
+            "Ironclad stability, valiant performance"   
+                         @knight_kernel                 
+          EOF
+
+          # Banner test (ditanam di script). Dipilih lewat input "banner":
+          #   rilis = banner.txt di atas, test = banner-test.txt di bawah ini.
+          #   Isinya sama persis dengan file banner-test.txt (spasi dipertahankan).
+          cat << 'EOF' > "$RUNNER_TEMP/banner-test.txt"
+           
+                        /\  /\  /\  /\  /\              
+                        <>  <>  <>  <>  <>              
+                        ==================              
+           
+                     Knight kernel test chopin           
+                    by @ardiantowb on telegram          
+               
+                              ______                    
+                             /      \                   
+                            /        \                  
+                            |        |                  
+                             \      /                   
+                              \    /                    
+                               \  /                     
+                                \/                      
+               
+                      Backup before flashing                 
+          EOF
+
+          BANNER_MODE="${{ github.event.inputs.banner || 'rilis' }}"
+          case "$BANNER_MODE" in
+            rilis)
+              echo "Banner: rilis (banner.txt bawaan script)"
+              ;;
+            test)
+              echo "Banner: test (banner-test.txt)"
+              cp -f "$RUNNER_TEMP/banner-test.txt" AnyKernel3/tools/banner.txt
+              ;;
+            *)
+              echo "::error::Pilihan banner tidak dikenali: $BANNER_MODE"
+              exit 1
+              ;;
+          esac
+
+      # ------------------------------------------------------------------
+      # 9.55. INTEGRASI KSU (opsional, hanya jika build_type bukan default)
+      #       Urutan mengikuti menu:
+      #         setup KSU (sesuai jenis build) -> versi KSU -> hook type
+      #         -> KSU manager -> deteksi hook -> NoMount
+      #         -> (lanjut ke step Build kernel)
+      #       Jenis build yang tersedia:
+      #         bakasu          -> setup.sh BakaSU
+      #         sukisu          -> setup.sh SukiSU-Ultra (builtin)
+      #         kernelsu-next   -> setup.sh KernelSU-Next (legacy)
+      #         ksu-backslashxx -> setup.sh backslashxx/KernelSU (master)
+      #       Jika build_type = default, step ini dilewati total dan
+      #       kernel dibuild apa adanya sesuai konfigurasi kernel.
+      #       File .patch (versi KSU, hook-type, multi-manager,
+      #       ksun-hook-detect) diunduh dari $PATCH_RAW_URL, hanya yang
+      #       dipilih di menu. Semua patch dijalankan dari root source
+      #       kernel (-p1) setelah setup KSU membuat folder KernelSU/ (atau KernelSU-Next/).
+      #       Output step ini ikut dicatat ke build.log supaya log tetap
+      #       ter-upload walaupun step ini yang gagal.
+      # ------------------------------------------------------------------
+      - name: Integrasi KSU
+        if: ${{ (github.event.inputs.build_type || 'default') != 'default' }}
+        working-directory: ${{ env.KERNEL_DIR }}
+        run: |
+          set -euo pipefail
+
+          LOG_FILE="${{ github.workspace }}/build.log"
+          PATCH_DIR="${{ runner.temp }}/ksu-patches"
+          BUILD_TYPE="${{ github.event.inputs.build_type || 'default' }}"
+          KSU_VERSION="${{ github.event.inputs.ksu_version || 'default' }}"
+          HOOK_TYPE="${{ github.event.inputs.hook_type || 'default' }}"
+          KSU_MANAGER="${{ github.event.inputs.ksu_manager || 'default' }}"
+          HOOK_DETECT="${{ github.event.inputs.hook_detect || 'default' }}"
+          NOMOUNT="${{ github.event.inputs.nomount || 'tidak' }}"
+
+          mkdir -p "$PATCH_DIR"
+
+          {
+            echo "=== KSU | build_type=$BUILD_TYPE | ksu_version=$KSU_VERSION | hook_type=$HOOK_TYPE | ksu_manager=$KSU_MANAGER | hook_detect=$HOOK_DETECT | nomount=$NOMOUNT ==="
+
+            # Terapkan 1 patch (idempotent). Argumen boleh berupa path
+            # relatif di repo patch (misal "ksun/kbuild-ksun.patch"):
+            #   - sudah diterapkan -> lewati
+            #   - bisa diterapkan  -> terapkan
+            #   - selain itu       -> konflik, gagalkan build
+            apply_patch() {
+              local name="$1"
+              local file="$PATCH_DIR/${name//\//_}"
+              echo "Mengunduh patch: $PATCH_RAW_URL/$name"
+              if ! curl -fLSs "$PATCH_RAW_URL/$name" -o "$file"; then
+                echo "::error::Gagal mengunduh patch $name dari $PATCH_RAW_URL (pastikan file ada di repo patch)"
+                exit 1
+              fi
+              if patch -p1 -R --dry-run -s -f < "$file" >/dev/null 2>&1; then
+                echo "Sudah diterapkan, lewati: $name"
+                return 0
+              fi
+              if patch -p1 --dry-run -s -f < "$file" >/dev/null 2>&1; then
+                patch -p1 -s -f < "$file"
+                echo "Berhasil diterapkan: $name"
+                return 0
+              fi
+              echo "::error::Patch tidak bisa diterapkan (konflik / source berubah): $name"
+              patch -p1 --dry-run -f < "$file" || true
+              exit 1
+            }
+
+            # 0) Setup KSU (dijalankan sebelum build, sebelum patch apa pun)
+            case "$BUILD_TYPE" in
+              bakasu)
+                echo "--- Setup BakaSU ---"
+                curl -fLSs "https://raw.githubusercontent.com/Baka-SU/BakaSU/main/kernel/setup.sh" | bash
+                ;;
+              sukisu)
+                echo "--- Setup SukiSU ---"
+                curl -fLSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s builtin
+                ;;
+              kernelsu-next)
+                echo "--- Setup KernelSU-Next ---"
+                curl -fLSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s legacy
+                ;;
+              ksu-backslashxx)
+                echo "--- Setup KernelSU (backslashxx) ---"
+                curl -fLSs "https://raw.githubusercontent.com/backslashxx/KernelSU/refs/heads/master/kernel/setup.sh" | bash -s master
+                ;;
+              *) echo "::error::Jenis build tidak dikenali: $BUILD_TYPE"; exit 1 ;;
+            esac
+
+            # Nama folder hasil setup berbeda per jenis build: KernelSU-Next
+            # membuat "KernelSU-Next/", sedangkan yang lain membuat "KernelSU/".
+            # (patch di ksun/*.patch memang menarget KernelSU-Next/kernel/...)
+            case "$BUILD_TYPE" in
+              kernelsu-next) KSU_DIR="KernelSU-Next" ;;
+              *)             KSU_DIR="KernelSU" ;;
+            esac
+
+            if [ ! -d "$KSU_DIR" ]; then
+              echo "::error::Folder $KSU_DIR tidak ada setelah setup ($BUILD_TYPE) - patch tidak bisa diterapkan"
+              echo "Folder di root source kernel:"
+              ls -d -- */ 2>/dev/null || true
+              exit 1
+            fi
+            echo "Folder KSU terdeteksi: $KSU_DIR"
+
+            # a) Versi KSU
+            case "$KSU_VERSION" in
+              default)       echo "Versi KSU: default (tidak ada yang diubah)" ;;
+              kbuild-bakasu) echo "Versi KSU: kbuild-bakasu"; apply_patch kbuild.patch ;;
+              kbuild-ksun)   echo "Versi KSU: kbuild-ksun"; apply_patch ksun/kbuild-ksun.patch ;;
+              *) echo "::error::Versi KSU tidak dikenali: $KSU_VERSION"; exit 1 ;;
+            esac
+
+            # b) Jenis hook
+            case "$HOOK_TYPE" in
+              default)       echo "Jenis hook: default (tidak ada yang diubah)" ;;
+              knight-bakasu) echo "Jenis hook: Knight (BakaSU)"; apply_patch hook-type.patch ;;
+              knight-ksun)   echo "Jenis hook: Knight (KSU Next)"; apply_patch ksun/hook-type-ksun.patch ;;
+              knight-sukisu) echo "Jenis hook: Knight (SukiSU)"; apply_patch sukisu/hook-type-sukisu.patch ;;
+              *) echo "::error::Jenis hook tidak dikenali: $HOOK_TYPE"; exit 1 ;;
+            esac
+
+            # c) KSU manager
+            case "$KSU_MANAGER" in
+              default)              echo "KSU manager: default (tidak ada yang diubah)" ;;
+              multi_manager-bakasu) echo "KSU manager: multi manager (BakaSU)"; apply_patch multi-manager.patch ;;
+              multi_manager-sukisu) echo "KSU manager: multi manager (SukiSU)"; apply_patch sukisu/multi-manager-sukisu.patch ;;
+              *) echo "::error::KSU manager tidak dikenali: $KSU_MANAGER"; exit 1 ;;
+            esac
+
+            # d) Deteksi hook
+            case "$HOOK_DETECT" in
+              default)  echo "Deteksi hook: default (tidak ada yang diubah)" ;;
+              ksun-for-bakasu) echo "Deteksi hook: KSUN for BakaSU"; apply_patch ksun-hook-detect.patch ;;
+              *) echo "::error::Deteksi hook tidak dikenali: $HOOK_DETECT"; exit 1 ;;
+            esac
+
+            # e) NoMount
+            case "$NOMOUNT" in
+              tidak) echo "NoMount: tidak (tidak ada yang diubah)" ;;
+              iya)
+                echo "NoMount: iya"
+                curl -fLSs "https://raw.githubusercontent.com/maxsteeel/nomount/refs/heads/dev/kernel/setup.sh" | bash -
+                ;;
+              *) echo "::error::Pilihan NoMount tidak dikenali: $NOMOUNT"; exit 1 ;;
+            esac
+
+            echo "Integrasi KSU selesai - lanjut ke build kernel"
+          } 2>&1 | tee -a "$LOG_FILE"
+
+      # ------------------------------------------------------------------
+      # 9.6. SIAPKAN NAMA ARTIFACT
+      # ------------------------------------------------------------------
+      - name: Siapkan nama artifact
+        id: meta
+        if: always()
+        run: |
+          # Format: chopin-{nama branch kernel}-{nomor build}
+          # Slash di nama branch diganti "-" karena nama artifact tidak
+          # boleh mengandung "/".
+          BRANCH_NAME="${{ github.event.inputs.kernel_branch || 'cp-cfg' }}"
+          BRANCH_SAFE="${BRANCH_NAME//\//-}"
+          echo "artifact_name=chopin-${BRANCH_SAFE}-${{ github.run_number }}" >> "$GITHUB_OUTPUT"
+          # Nama zip .config (dan nama file di dalamnya): config-{nomor build}-{nama branch}-chopin
+          echo "config_name=config-${{ github.run_number }}-${BRANCH_SAFE}-chopin" >> "$GITHUB_OUTPUT"
+
+      # ------------------------------------------------------------------
+      # 10. BUILD KERNEL (dengan timer)
+      # ------------------------------------------------------------------
+      - name: Build kernel
+        id: build
+        run: |
+          START_TIME=$(date +%s)
+
+          cd "$KERNEL_DIR"
+          mkdir -p "$OUT_DIR"
+
+          DEFCONFIG="${{ github.event.inputs.defconfig || 'chopin_defconfig' }}"
+          LTO_MODE="${{ github.event.inputs.lto_mode || 'none' }}"
+          TOOLCHAIN="${{ steps.tcver.outputs.toolchain }}"
+
+          # --- Host & timestamp build (custom, default timezone UTC) ---
+          BUILD_TZ="${{ github.event.inputs.build_timezone || 'UTC' }}"
+          CUSTOM_HOST="${{ github.event.inputs.kbuild_build_host }}"
+          CUSTOM_TIMESTAMP="${{ github.event.inputs.kbuild_build_timestamp }}"
+
+          # Default: builder@ardiantowb. Input boleh diisi "host" saja (user
+          # tetap "builder") atau lengkap "user@host" untuk override keduanya.
+          if [ -z "$CUSTOM_HOST" ]; then
+            BUILD_USER="builder"
+            BUILD_HOST="ardiantowb"
+          elif [[ "$CUSTOM_HOST" == *"@"* ]]; then
+            BUILD_USER="${CUSTOM_HOST%%@*}"
+            BUILD_HOST="${CUSTOM_HOST#*@}"
+          else
+            BUILD_USER="builder"
+            BUILD_HOST="$CUSTOM_HOST"
+          fi
+
+          if [ -n "$CUSTOM_TIMESTAMP" ]; then
+            BUILD_TIMESTAMP="$CUSTOM_TIMESTAMP"
+          else
+            BUILD_TIMESTAMP="$(TZ="$BUILD_TZ" date '+%a %B %d %H:%M:%S %Z %Y')"
+          fi
+
+          # Optimasi CPU untuk Dimensity 1100 (MT6891: 4x Cortex-A78 + 4x
+          # Cortex-A55, ARMv8.2-A). Flag dikirim lewat KCFLAGS sehingga tidak
+          # tergantung versi kernel (berlaku sama untuk 4.14 maupun 4.19).
+          # Nama source "mt6893" (Dimensity 1200, cluster 1+3+4) memakai core
+          # CPU yang sama, jadi flag ini tetap valid.
+          CUSTOM_CFLAGS="-march=armv8.2-a -mno-outline -mno-outline-atomics"
+
+          # AOSP Clang (r487747c / r547379 / r596125) menyertakan model MLGO
+          # (machine-learning guided optimization) untuk alokasi register,
+          # dilatih dari artefak userspace - belum tentu cocok untuk kode
+          # kernel. Matikan lewat -mllvm agar kembali ke heuristic register
+          # allocator bawaan LLVM.
+          case "$TOOLCHAIN" in
+            aosp17|aosp20|aosp22)
+              CUSTOM_CFLAGS="$CUSTOM_CFLAGS -mllvm -regalloc-enable-advisor=default"
+              ;;
+          esac
+
+          TOOLCHAIN_ARGS=(
+            ARCH=arm64
+            CC="ccache clang"
+            HOSTCC="ccache clang"
+            HOSTCXX="ccache clang++"
+            LD=ld.lld
+            AR=llvm-ar
+            NM=llvm-nm
+            OBJCOPY=llvm-objcopy
+            OBJDUMP=llvm-objdump
+            STRIP=llvm-strip
+            READELF=llvm-readelf
+            OBJSIZE=llvm-size
+            LLVM=1
+            LLVM_IAS=1
+            KBUILD_BUILD_USER="$BUILD_USER"
+            KBUILD_BUILD_HOST="$BUILD_HOST"
+            KBUILD_BUILD_TIMESTAMP="$BUILD_TIMESTAMP"
+            CLANG_TRIPLE=aarch64-linux-gnu-
+            CROSS_COMPILE=aarch64-linux-gnu-
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi-
+            # -fuse-ld=lld untuk host tool (fixdep dkk): Proton/AOSP Clang lama
+            # membawa ld yang belum kenal section terbaru di glibc runner ini -
+            # ld.lld jauh lebih baru dan aman dipakai untuk build host.
+            HOSTCFLAGS="-fuse-ld=lld"
+            HOSTLDFLAGS="-fuse-ld=lld"
+            KCFLAGS="$CUSTOM_CFLAGS"
+          )
+
+          echo "=== Defconfig: $DEFCONFIG | Toolchain: $TOOLCHAIN | LTO: $LTO_MODE | Host: ${BUILD_USER}@${BUILD_HOST} | Timestamp: ${BUILD_TIMESTAMP} ==="
+
+          LOG_FILE="${{ github.workspace }}/build.log"
+
+          # --- Generate defconfig ---
+          make O="$OUT_DIR" "${TOOLCHAIN_ARGS[@]}" "$DEFCONFIG" 2>&1 | tee -a "$LOG_FILE"
+
+          # --- Terapkan mode LTO ke .config ---
+          # Di kernel 4.14/4.19 LTO dipilih lewat Kconfig (bukan variabel make
+          # LTO=), jadi .config hasil defconfig diubah dengan scripts/config
+          # lalu di-resolve ulang dengan olddefconfig:
+          #   thin -> LTO_CLANG=y, THINLTO=y
+          #   full -> LTO_CLANG=y, THINLTO tidak aktif
+          #   none -> LTO_CLANG mati (CFI_CLANG ikut dimatikan karena CFI
+          #           butuh LTO)
+          SC="$KERNEL_DIR/scripts/config"
+          CFG="$OUT_DIR/.config"
+          case "$LTO_MODE" in
+            thin) "$SC" --file "$CFG" -e LTO_CLANG -e THINLTO ;;
+            full) "$SC" --file "$CFG" -e LTO_CLANG -d THINLTO ;;
+            none) "$SC" --file "$CFG" -d LTO_CLANG -d THINLTO -d CFI_CLANG -d CFI_PERMISSIVE ;;
+            *)
+              echo "::error::Mode LTO tidak dikenali: $LTO_MODE"
+              exit 1
+              ;;
+          esac
+          make O="$OUT_DIR" "${TOOLCHAIN_ARGS[@]}" olddefconfig 2>&1 | tee -a "$LOG_FILE"
+
+          echo "--- Konfigurasi LTO/CFI/SCS hasil akhir ---" | tee -a "$LOG_FILE"
+          grep -E '^(# )?CONFIG_(LTO_CLANG|THINLTO|CFI_CLANG|CFI_PERMISSIVE|SHADOW_CALL_STACK)[= ]' "$CFG" | tee -a "$LOG_FILE" || true
+
+          # Pastikan hasilnya benar-benar sesuai pilihan (kalau nama simbol
+          # Kconfig di tree ini beda, build berhenti di sini - bukan diam-diam
+          # jalan dengan mode LTO yang salah).
+          LTO_OK=1
+          case "$LTO_MODE" in
+            thin) { grep -q '^CONFIG_LTO_CLANG=y' "$CFG" && grep -q '^CONFIG_THINLTO=y' "$CFG"; } || LTO_OK=0 ;;
+            full) { grep -q '^CONFIG_LTO_CLANG=y' "$CFG" && ! grep -q '^CONFIG_THINLTO=y' "$CFG"; } || LTO_OK=0 ;;
+            none) ! grep -q '^CONFIG_LTO_CLANG=y' "$CFG" || LTO_OK=0 ;;
+          esac
+          if [ "$LTO_OK" != 1 ]; then
+            echo "::error::Mode LTO '$LTO_MODE' gagal diterapkan ke .config (cek simbol LTO_CLANG/THINLTO di Kconfig tree ini, lihat log di atas)"
+            exit 1
+          fi
+
+          # --- Build utama ---
+          make -j"$(nproc --all)" O="$OUT_DIR" "${TOOLCHAIN_ARGS[@]}" Image dtbs 2>&1 | tee -a "$LOG_FILE"
+          BUILD_EXIT=${PIPESTATUS[0]}
+
+          ccache -s | tee -a "$LOG_FILE"
+
+          END_TIME=$(date +%s)
+          DURATION=$((END_TIME - START_TIME))
+          MIN=$((DURATION / 60))
+          SEC=$((DURATION % 60))
+
+          echo "-----------------------------------------------------"
+          echo "Waktu total kompilasi: ${MIN} menit ${SEC} detik"
+          echo "-----------------------------------------------------"
+
+          echo "duration_min=${MIN}" >> "$GITHUB_OUTPUT"
+          echo "duration_sec=${SEC}" >> "$GITHUB_OUTPUT"
+          echo "defconfig=${DEFCONFIG}" >> "$GITHUB_OUTPUT"
+          echo "toolchain=${TOOLCHAIN}" >> "$GITHUB_OUTPUT"
+          echo "lto_mode=${LTO_MODE}" >> "$GITHUB_OUTPUT"
+          echo "build_host=${BUILD_USER}@${BUILD_HOST}" >> "$GITHUB_OUTPUT"
+          echo "build_timestamp=${BUILD_TIMESTAMP}" >> "$GITHUB_OUTPUT"
+
+          exit "$BUILD_EXIT"
+
+      # ------------------------------------------------------------------
+      # 11. VERIFIKASI & GABUNGKAN DTB
+      # ------------------------------------------------------------------
+      - name: Verifikasi image & gabungkan dtb
+        run: |
+          BOOT_DIR="${{ env.OUT_DIR }}/arch/arm64/boot"
+
+          if [ ! -f "${BOOT_DIR}/Image" ]; then
+            echo "BUILD GAGAL - file Image tidak ditemukan"
+            exit 1
+          fi
+          echo "BUILD BERHASIL - Image ditemukan ($(du -h "${BOOT_DIR}/Image" | cut -f1))"
+
+          find "${{ env.OUT_DIR }}/arch/arm64/boot/dts/" -name "*.dtb" -type f -exec cat {} + > "${BOOT_DIR}/dtb"
+
+          if [ ! -s "${BOOT_DIR}/dtb" ]; then
+            echo "GAGAL - tidak ditemukan file dtb hasil kompilasi"
+            exit 1
+          fi
+          echo "DTB berhasil digabungkan: ${BOOT_DIR}/dtb ($(du -h "${BOOT_DIR}/dtb" | cut -f1))"
+
+      # ------------------------------------------------------------------
+      # 11.5. BUAT Image.gz & Image.gz-dtb
+      #       (beberapa tool/format boot image lama butuh varian gzip ini,
+      #        bukan cuma Image mentah)
+      # ------------------------------------------------------------------
+      - name: Buat Image.gz & Image.gz-dtb
+        run: |
+          BOOT_DIR="${{ env.OUT_DIR }}/arch/arm64/boot"
+
+          gzip -c "${BOOT_DIR}/Image" > "${BOOT_DIR}/Image.gz"
+          cat "${BOOT_DIR}/Image.gz" "${BOOT_DIR}/dtb" > "${BOOT_DIR}/Image.gz-dtb"
+
+          echo "Image.gz dibuat: $(du -h "${BOOT_DIR}/Image.gz" | cut -f1)"
+          echo "Image.gz-dtb dibuat: $(du -h "${BOOT_DIR}/Image.gz-dtb" | cut -f1)"
+
+      # ------------------------------------------------------------------
+      # 12. PAKET ANYKERNEL3
+      # ------------------------------------------------------------------
+      - name: Paket AnyKernel3
+        run: |
+          BOOT_DIR="${{ env.OUT_DIR }}/arch/arm64/boot"
+
+          cp -f "${BOOT_DIR}/Image" ./AnyKernel3/
+          cp -f "${BOOT_DIR}/dtb" ./AnyKernel3/
+          [ -f "${BOOT_DIR}/dtbo.img" ] && cp -f "${BOOT_DIR}/dtbo.img" ./AnyKernel3/
+
+          cd AnyKernel3/
+          zip -q -r "${{ github.workspace }}/${{ steps.meta.outputs.artifact_name }}.zip" *
+
+      # ------------------------------------------------------------------
+      # 12.5. PAKET .CONFIG
+      #       .config final (sesudah mode LTO diterapkan + olddefconfig)
+      #       dibungkus zip terpisah. Selalu dibuat apa pun pilihan
+      #       artifact_scope-nya, dan tetap dibuat walau build gagal
+      #       (berguna untuk debugging).
+      #       Juga tetap dibuat kalau workflow dibatalkan (Cancel)
+      #       setelah proses kompilasi dimulai, karena step ini
+      #       memakai if: always() dan .config sudah ada sejak tahap
+      #       defconfig di step "Build kernel".
+      #       Zip dan file di dalamnya dinamai config-{nomor build}-
+      #       {nama branch}-chopin (file di dalam zip tidak tersembunyi
+      #       seperti .config). Zip tetap diperlukan: upload-artifact
+      #       mengabaikan file tersembunyi secara default, jadi .config
+      #       tidak ikut terupload lewat folder out lengkap.
+      # ------------------------------------------------------------------
+      - name: Paket .config
+        if: always()
+        run: |
+          CFG="${{ env.OUT_DIR }}/.config"
+          CFG_NAME="${{ steps.meta.outputs.config_name }}"
+          ZIP="${{ github.workspace }}/${CFG_NAME}.zip"
+
+          if [ -f "$CFG" ]; then
+            TMPD="$(mktemp -d)"
+            cp "$CFG" "$TMPD/$CFG_NAME"
+            ( cd "$TMPD" && zip -q "$ZIP" "$CFG_NAME" )
+            echo "Zip .config dibuat ($CFG_NAME): $(du -h "$ZIP" | cut -f1)"
+          else
+            echo "::warning::.config tidak ditemukan di ${{ env.OUT_DIR }}, zip .config dilewati"
+          fi
+
+      # ------------------------------------------------------------------
+      # 13. UPLOAD ARTIFACT
+      #     Zip AnyKernel3 (siap flash) dan zip .config SELALU diupload
+      #     apa pun pilihan artifact_scope-nya.
+      #     - "ringkas" (default): AnyKernel3 zip + folder boot mentah
+      #       (Image, Image.gz, Image.gz-dtb, dtb, dtbo.img, dll).
+      #     - "lengkap": tambahan folder out/ penuh (vmlinux, System.map,
+      #       semua .o, dll - untuk debugging). Folder boot mentah sudah
+      #       ikut terangkut di dalam folder out/ ini juga.
+      # ------------------------------------------------------------------
+      - name: Upload AnyKernel3 (siap flash)
+        uses: actions/upload-artifact@v7
+        with:
+          # archive: false = file .zip diupload langsung, tidak dibungkus
+          # zip lagi. Nama artifact otomatis = nama file (input "name"
+          # diabaikan oleh action).
+          path: ${{ github.workspace }}/${{ steps.meta.outputs.artifact_name }}.zip
+          archive: false
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload .config (zip terpisah)
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          # Sama seperti zip AnyKernel3: archive false = zip diupload
+          # langsung, nama artifact = nama file (config-...-chopin.zip).
+          path: ${{ github.workspace }}/${{ steps.meta.outputs.config_name }}.zip
+          archive: false
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload file boot mentah (ringkas)
+        if: ${{ github.event.inputs.artifact_scope != 'lengkap' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.meta.outputs.artifact_name }}-boot
+          path: ${{ env.OUT_DIR }}/arch/arm64/boot
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload folder out lengkap (tambahan, untuk debugging)
+        if: ${{ github.event.inputs.artifact_scope == 'lengkap' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.meta.outputs.artifact_name }}-out
+          path: ${{ env.OUT_DIR }}
+          if-no-files-found: warn
+          retention-days: 7
+
+      # ------------------------------------------------------------------
+      # 13.5. UPLOAD LOG BUILD
+      # ------------------------------------------------------------------
+      - name: Upload log build
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.meta.outputs.artifact_name }}-log
+          path: ${{ github.workspace }}/build.log
+          if-no-files-found: warn
+          retention-days: 14
+
+      # ------------------------------------------------------------------
+      # 14. STEP SUMMARY
+      # ------------------------------------------------------------------
+      - name: Build summary
+        if: always()
+        run: |
+          {
+            echo "## Ringkasan Build Kernel 4.19 Chopin"
+            echo ""
+            echo "| Item | Nilai |"
+            echo "|---|---|"
+            echo "| Device | chopin (Dimensity 1100) |"
+            echo "| Kernel repo | \`${{ github.event.inputs.kernel_repo || 'https://github.com/kucingoranye/kernel_xiaomi_mt6893_419' }}\` |"
+            echo "| Kernel branch | \`${{ github.event.inputs.kernel_branch || 'cp-cfg' }}\` |"
+            echo "| Defconfig | \`${{ steps.build.outputs.defconfig }}\` |"
+            echo "| Toolchain | \`${{ steps.build.outputs.toolchain }}\` |"
+            echo "| Mode LTO | \`${{ steps.build.outputs.lto_mode }}\` |"
+            echo "| Banner | \`${{ github.event.inputs.banner || 'rilis' }}\` |"
+            echo "| Jenis build | \`${{ github.event.inputs.build_type || 'default' }}\` |"
+            echo "| Versi KSU | \`${{ ((github.event.inputs.build_type || 'default') != 'default' && (github.event.inputs.ksu_version || 'default')) || '-' }}\` |"
+            echo "| Hook type | \`${{ ((github.event.inputs.build_type || 'default') != 'default' && (github.event.inputs.hook_type || 'default')) || '-' }}\` |"
+            echo "| KSU manager | \`${{ ((github.event.inputs.build_type || 'default') != 'default' && (github.event.inputs.ksu_manager || 'default')) || '-' }}\` |"
+            echo "| Deteksi hook | \`${{ ((github.event.inputs.build_type || 'default') != 'default' && (github.event.inputs.hook_detect || 'default')) || '-' }}\` |"
+            echo "| NoMount | \`${{ ((github.event.inputs.build_type || 'default') != 'default' && (github.event.inputs.nomount || 'tidak')) || '-' }}\` |"
+            echo "| Build host | \`${{ steps.build.outputs.build_host }}\` |"
+            echo "| Build timestamp | \`${{ steps.build.outputs.build_timestamp }}\` |"
+            echo "| Waktu kompilasi | **${{ steps.build.outputs.duration_min }} menit ${{ steps.build.outputs.duration_sec }} detik** |"
+            echo "| Status | ${{ job.status }} |"
+          } >> "$GITHUB_STEP_SUMMARY"
