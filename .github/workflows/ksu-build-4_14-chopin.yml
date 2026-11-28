@@ -424,6 +424,15 @@ jobs:
 
           split_boot;
           flash_boot;
+
+          # Bersihkan dalvik-cache supaya dibuat ulang saat boot berikutnya.
+          # Hanya dijalankan dari recovery (tidak ada zygote), supaya tidak
+          # menghapus cache saat Android sedang berjalan.
+          if ! (ps -A 2>/dev/null | grep -v grep | grep -q zygote); then
+            mount /data 2>/dev/null;
+            ui_print "Membersihkan dalvik-cache...";
+            rm -rf /data/dalvik-cache/* 2>/dev/null;
+          fi;
           EOF
 
           mkdir -p AnyKernel3/tools
